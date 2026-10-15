@@ -1,0 +1,12 @@
+.DS_Store
+*.xcuserstate
+*.xcuserdata/
+CMakeUserPresets.json
+/build/
+/build-*/
+/cmake-build-*/
+/Pieces/
+/Keeps/
+/Scenes/
+/Recordings/
+/Samples/
