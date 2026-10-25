@@ -202,7 +202,20 @@ public:
    loopLengths[i].setSliderStyle(juce::Slider::IncDecButtons);
    loopLengths[i].setTextBoxStyle(juce::Slider::TextBoxLeft,false,40,24);
    loopLengths[i].setValue(Engine::steps,juce::dontSendNotification);
-   loopLengths[i].onValueChange=[this,i]{engine.setLoopSteps(i,static_cast<int>(loopLengths[i].getValue()));rememberPattern(i,true);resized();repaint();};
+   loopLengths[i].onValueChange=[this,i]{rememberPattern(i,true);engine.setLoopSteps(i,static_cast<int>(loopLengths[i].getValue()));syncRhythmControls(i);rememberPattern(i,true);resized();repaint();};
+   addAndMakeVisible(rhythms[i]);rhythms[i].setName("Rhythm");rhythmHits[i].setName("Hits");rhythmRotations[i].setName("Rotate");rhythms[i].addItem("Free",1);rhythms[i].addItem("Euclidean",2);
+   rhythms[i].setSelectedId(1,juce::dontSendNotification);
+   rhythms[i].setTooltip("Free uses Density and follower timing. Euclidean spreads an exact number of hits across this track's loop.");
+   rhythms[i].onChange=[this,i]{changeRhythm(i);};
+   for(auto* control:{&rhythmHits[i],&rhythmRotations[i]}){
+    addAndMakeVisible(*control);control->setSliderStyle(juce::Slider::IncDecButtons);
+    control->setTextBoxStyle(juce::Slider::TextBoxLeft,false,40,24);
+   }
+   rhythmHits[i].setTooltip("Exact number of hits, including zero for silence. Changing this reshapes the rhythm while keeping its melodic notes.");
+   rhythmRotations[i].setTooltip("Move every hit right by this many steps, wrapping around the loop. Notes move with their hits.");
+   syncRhythmControls(i);
+   rhythmHits[i].onValueChange=[this,i]{changeRhythm(i);};
+   rhythmRotations[i].onValueChange=[this,i]{changeRhythm(i);};
    auto setupRowToggle=[](juce::TextButton& button,const juce::String& title,juce::Colour active){
     button.setButtonText(title);button.setClickingTogglesState(true);
     button.setColour(juce::TextButton::buttonColourId,juce::Colour(0xff27302f));
@@ -388,7 +401,7 @@ public:
   if(activeTrackCount==0)return;
   const int panelY=soundPanelY();
   const bool sampleSelected=selectedTrackIsSample();
-  const int effectTop=sampleSelected?254:180;
+  const int effectTop=sampleSelected?314:240;
   g.setColour(juce::Colour(0xff222727));g.fillRoundedRectangle(24.f,static_cast<float>(panelY),static_cast<float>(getWidth()-48),static_cast<float>(trackPanelHeight()),8.f);
   g.setColour(juce::Colour(0xffe9eeeb));g.setFont(16.f);g.drawText(juce::String(selectedTrack+1)+". "+trackNames[selectedTrack],48,panelY+11,180,24,juce::Justification::centredLeft);
   label(g,"Loop steps",700,panelY+14);
@@ -403,10 +416,13 @@ public:
 	  g.setColour(juce::Colour(0xff3b4943));g.fillRect(40,panelY+98,getWidth()-80,1);
 	  if(selectedTrack>0){label(g,"Role",48,panelY+104);label(g,"Relationship",208,panelY+104);}
 	  label(g,"Dynamics",368,panelY+104);label(g,"Articulation",508,panelY+104);label(g,"Note length",648,panelY+104);label(g,"Note tail",788,panelY+104);
+   label(g,"Rhythm",48,panelY+160);label(g,"Hits",228,panelY+160);label(g,"Rotate",388,panelY+160);
+   g.setColour(juce::Colour(0xff94bba4));g.setFont(12.f);
+   g.drawText(engine.rhythmMode[selectedTrack].load()==1?"Exact spacing; Generate changes pitches. Manual edits return to Free.":"Density and follower relationships shape the timing.",548,panelY+179,510,26,juce::Justification::centredLeft);
    if(sampleSelected){
-    g.setColour(juce::Colour(0xff3b4943));g.fillRect(40,panelY+158,getWidth()-80,1);
-    g.setColour(juce::Colour(0xff94bba4));g.setFont(11.f);g.drawText("SAMPLE SHAPE",48,panelY+160,160,14,juce::Justification::centredLeft);
-    label(g,"Start",48,panelY+177);label(g,"Size",168,panelY+177);label(g,"Fade",288,panelY+177);label(g,"Play",508,panelY+177);
+    g.setColour(juce::Colour(0xff3b4943));g.fillRect(40,panelY+218,getWidth()-80,1);
+    g.setColour(juce::Colour(0xff94bba4));g.setFont(11.f);g.drawText("SAMPLE SHAPE",48,panelY+220,160,14,juce::Justification::centredLeft);
+    label(g,"Start",48,panelY+237);label(g,"Size",168,panelY+237);label(g,"Fade",288,panelY+237);label(g,"Play",508,panelY+237);
    }
    g.setColour(juce::Colour(0xff3b4943));g.fillRect(40,panelY+effectTop-22,getWidth()-80,1);
    label(g,"Track effects (1 then 2)",48,panelY+effectTop-17);
@@ -439,7 +455,7 @@ public:
   editInstrument.setVisible(hasTrack&&kinds[selectedTrack].getSelectedId()==5);
   removeInstrument.setVisible(hasTrack&&kinds[selectedTrack].getSelectedId()==5);
   const int panelY=soundPanelY();
-  const int effectTop=selectedTrackIsSample()?254:180;
+  const int effectTop=selectedTrackIsSample()?314:240;
   for(int effectIndex=0;effectIndex<trackEffectCount;++effectIndex){
    const int rowY=panelY+effectTop+effectIndex*38;
    chooseTrackEffect[effectIndex].setBounds(48,rowY,600,28);
@@ -466,9 +482,12 @@ public:
    trackSelect[c].toFront(false);rowLevels[c].toFront(false);focuses[c].toFront(false);holds[c].toFront(false);mutes[c].toFront(false);solos[c].toFront(false);
   }
   if(editingTrack>=0&&editingTrack<activeTrackCount){trackNameEditor.setBounds(trackSelect[editingTrack].getBounds());trackNameEditor.toFront(false);}
-	  for(int c=0;c<Engine::maxTracks;++c){const bool selected=c==selectedTrack;const bool followerSelected=selected&&c>0;const bool sampleSelected=selected&&kinds[c].getSelectedId()==3;kinds[c].setVisible(selected);sounds[c].setVisible(selected&&kinds[c].getSelectedId()!=5);sources[c].setVisible(false);materials[c].setVisible(false);playModes[c].setVisible(sampleSelected);sampleStarts[c].setVisible(sampleSelected);sampleSizes[c].setVisible(sampleSelected);sampleFades[c].setVisible(sampleSelected);sampleReverses[c].setVisible(sampleSelected);librarySounds[c].setVisible(false);instruments[c].setVisible(false);roles[c].setVisible(followerSelected);lengths[c].setVisible(selected);loopLengths[c].setVisible(selected);levels[c].setVisible(false);sends[c].setVisible(selected);colors[c].setVisible(selected);moves[c].setVisible(selected);weathers[c].setVisible(selected);relationships[c].setVisible(followerSelected);dynamics[c].setVisible(selected);articulations[c].setVisible(selected);tails[c].setVisible(selected);connects[c].setVisible(selected);}
+	  for(int c=0;c<Engine::maxTracks;++c){const bool selected=c==selectedTrack;const bool followerSelected=selected&&c>0;const bool sampleSelected=selected&&kinds[c].getSelectedId()==3;kinds[c].setVisible(selected);sounds[c].setVisible(selected&&kinds[c].getSelectedId()!=5);sources[c].setVisible(false);materials[c].setVisible(false);playModes[c].setVisible(sampleSelected);sampleStarts[c].setVisible(sampleSelected);sampleSizes[c].setVisible(sampleSelected);sampleFades[c].setVisible(sampleSelected);sampleReverses[c].setVisible(sampleSelected);librarySounds[c].setVisible(false);instruments[c].setVisible(false);roles[c].setVisible(followerSelected);lengths[c].setVisible(selected);loopLengths[c].setVisible(selected);rhythms[c].setVisible(selected);rhythmHits[c].setVisible(selected);rhythmRotations[c].setVisible(selected);levels[c].setVisible(false);sends[c].setVisible(selected);colors[c].setVisible(selected);moves[c].setVisible(selected);weathers[c].setVisible(selected);relationships[c].setVisible(followerSelected);dynamics[c].setVisible(selected);articulations[c].setVisible(selected);tails[c].setVisible(selected);connects[c].setVisible(selected);}
   if(activeTrackCount==0||selectedTrack<0||selectedTrack>=activeTrackCount){patternBack.setVisible(false);trackGenerate.setVisible(false);patternForward.setVisible(false);aiIdea.setVisible(false);trackActions.setVisible(false);stepPage.setVisible(false);soundPrevious.setVisible(false);soundNext.setVisible(false);soundRandom.setVisible(false);soundBack.setVisible(false);soundForward.setVisible(false);return;}
 	  patternBack.setVisible(true);trackGenerate.setVisible(true);patternForward.setVisible(true);aiIdea.setVisible(true);trackActions.setVisible(true);patternBack.setBounds(240,panelY+12,92,24);trackGenerate.setBounds(342,panelY+12,126,24);patternForward.setBounds(478,panelY+12,92,24);aiIdea.setBounds(580,panelY+12,88,24);loopLengths[selectedTrack].setBounds(778,panelY+12,108,26);trackActions.setBounds(getWidth()-104,panelY+12,56,24);
+  rhythms[selectedTrack].setBounds(48,panelY+180,140,26);
+  rhythmHits[selectedTrack].setBounds(228,panelY+180,120,26);
+  rhythmRotations[selectedTrack].setBounds(388,panelY+180,120,26);
   int longestLoop=Engine::steps;for(int c=0;c<activeTrackCount;++c)longestLoop=std::max(longestLoop,engine.loopSteps[c].load());
   const int pageCount=(longestLoop+Engine::steps-1)/Engine::steps;
   for(int page=1;page<=Engine::maxLoopSteps/Engine::steps;++page)stepPage.setItemEnabled(page+1,page<=pageCount);
@@ -482,7 +501,7 @@ public:
 	  sends[selectedTrack].setBounds(580,panelY+60,105,28);colors[selectedTrack].setBounds(700,panelY+60,110,28);moves[selectedTrack].setBounds(820,panelY+60,110,28);weathers[selectedTrack].setBounds(940,panelY+60,128,28);
 	  if(selectedTrack>0){roles[selectedTrack].setBounds(48,panelY+123,140,26);relationships[selectedTrack].setBounds(208,panelY+121,140,28);}
 	  dynamics[selectedTrack].setBounds(368,panelY+121,120,28);articulations[selectedTrack].setBounds(508,panelY+121,120,28);lengths[selectedTrack].setBounds(648,panelY+123,120,26);tails[selectedTrack].setBounds(788,panelY+121,120,28);connects[selectedTrack].setBounds(928,panelY+123,120,26);
-	  sampleStarts[selectedTrack].setBounds(48,panelY+195,108,28);sampleSizes[selectedTrack].setBounds(168,panelY+195,108,28);sampleFades[selectedTrack].setBounds(288,panelY+195,108,28);sampleReverses[selectedTrack].setBounds(406,panelY+198,70,22);playModes[selectedTrack].setBounds(508,panelY+195,120,26);
+	  sampleStarts[selectedTrack].setBounds(48,panelY+255,108,28);sampleSizes[selectedTrack].setBounds(168,panelY+255,108,28);sampleFades[selectedTrack].setBounds(288,panelY+255,108,28);sampleReverses[selectedTrack].setBounds(406,panelY+258,70,22);playModes[selectedTrack].setBounds(508,panelY+255,120,26);
  }
  void mouseDown(const juce::MouseEvent& e) override {
    const int track=trackAt(e.position);
@@ -491,7 +510,7 @@ public:
    selectTrack(track);
    if(step>=0){
     const int absoluteStep=visibleStepPage()*Engine::steps+step;
-    if(absoluteStep<engine.loopSteps[track].load()){engine.toggleStep(track,absoluteStep);rememberPattern(track,true);}
+    if(absoluteStep<engine.loopSteps[track].load()){rememberPattern(track,true);setRhythmSettings(track,0,engine.euclideanHits[track].load(),engine.euclideanRotate[track].load());engine.toggleStep(track,absoluteStep);rememberPattern(track,true);}
    }else revealSelectedTrackInspector();
    repaint();
   }
@@ -562,8 +581,8 @@ private:
   std::array<int,Engine::maxLoopSteps> phrase{};
   int role=1;
   int relationship=0;
-  int dynamics=0,articulation=0,motion=0,texture=0,length=1,loopSteps=Engine::steps;
-  bool sameControls(const PatternCandidate& other) const {return role==other.role&&relationship==other.relationship&&dynamics==other.dynamics&&articulation==other.articulation&&motion==other.motion&&texture==other.texture&&length==other.length&&loopSteps==other.loopSteps;}
+  int dynamics=0,articulation=0,motion=0,texture=0,length=1,loopSteps=Engine::steps,rhythm=0,hits=5,rotation=0;
+  bool sameControls(const PatternCandidate& other) const {return role==other.role&&relationship==other.relationship&&dynamics==other.dynamics&&articulation==other.articulation&&motion==other.motion&&texture==other.texture&&length==other.length&&loopSteps==other.loopSteps&&rhythm==other.rhythm&&hits==other.hits&&rotation==other.rotation;}
   bool operator==(const PatternCandidate& other) const {return phrase==other.phrase&&sameControls(other);}
  };
  std::array<std::vector<PatternCandidate>,Engine::maxTracks> patternHistory{};
@@ -596,7 +615,7 @@ private:
  static constexpr int sequenceRowHeight=34;
  int soundPanelY() const {return sequenceTop+activeTrackCount*sequenceRowHeight+14;}
  bool selectedTrackIsSample() const {return selectedTrack>=0&&selectedTrack<activeTrackCount&&kinds[selectedTrack].getSelectedId()==3;}
- int trackPanelHeight() const {return selectedTrackIsSample()?332:258;}
+ int trackPanelHeight() const {return selectedTrackIsSample()?392:318;}
  int recordPanelY() const {return activeTrackCount==0?sequenceTop+48:soundPanelY()+trackPanelHeight()+12;}
  int contentHeight() const {return recordPanelOpen?std::max(760,recordPanelY()+180):std::max(760,recordPanelY());}
  void setRecordPanelOpen(bool open){
@@ -1109,6 +1128,7 @@ private:
 	  roles[to].setSelectedId(roles[from].getSelectedId());relationships[to].setValue(relationships[from].getValue());dynamics[to].setValue(dynamics[from].getValue());articulations[to].setValue(articulations[from].getValue());tails[to].setValue(tails[from].getValue());
 	  lengths[to].setSelectedId(lengths[from].getSelectedId());
   loopLengths[to].setValue(loopLengths[from].getValue(),juce::dontSendNotification);engine.setLoopSteps(to,static_cast<int>(loopLengths[to].getValue()));
+  setRhythmSettings(to,engine.rhythmMode[from].load(),engine.euclideanHits[from].load(),engine.euclideanRotate[from].load());
   connects[to].setToggleState(connects[from].getToggleState(),juce::sendNotification);
   levels[to].setValue(levels[from].getValue());sends[to].setValue(sends[from].getValue());colors[to].setValue(colors[from].getValue());moves[to].setValue(moves[from].getValue());weathers[to].setValue(weathers[from].getValue());
   setManualTrackLevel(to,levels[to].getValue());
@@ -1203,8 +1223,25 @@ private:
   refreshInstrumentControls();
   resized();repaint();
  }
+ void syncRhythmControls(int lane){
+  const int length=engine.loopSteps[lane].load();
+  rhythms[lane].setSelectedId(engine.rhythmMode[lane].load()+1,juce::dontSendNotification);
+  rhythmHits[lane].setRange(0,length,1);rhythmRotations[lane].setRange(0,std::max(1,length-1),1);
+  rhythmHits[lane].setValue(engine.euclideanHits[lane].load(),juce::dontSendNotification);
+  rhythmRotations[lane].setValue(engine.euclideanRotate[lane].load(),juce::dontSendNotification);
+  const bool euclidean=engine.rhythmMode[lane].load()==1;
+  rhythmHits[lane].setEnabled(euclidean);rhythmRotations[lane].setEnabled(euclidean&&length>1);
+ }
+ void setRhythmSettings(int lane,int rhythm,int hits,int rotation,bool apply=false){
+  engine.setRhythm(lane,rhythm,hits,rotation,apply);syncRhythmControls(lane);
+ }
+ void changeRhythm(int lane){
+  rememberPattern(lane,true);
+  setRhythmSettings(lane,rhythms[lane].getSelectedId()-1,static_cast<int>(rhythmHits[lane].getValue()),static_cast<int>(rhythmRotations[lane].getValue()),true);
+  rememberPattern(lane,true);repaint();
+ }
  PatternCandidate currentPattern(int lane) const {
-  return {engine.getTrackPattern(lane),roles[lane].getSelectedId(),static_cast<int>(relationships[lane].getValue()),static_cast<int>(dynamics[lane].getValue()),static_cast<int>(articulations[lane].getValue()),static_cast<int>(moves[lane].getValue()),static_cast<int>(weathers[lane].getValue()),lengths[lane].getSelectedId(),static_cast<int>(loopLengths[lane].getValue())};
+  return {engine.getTrackPattern(lane),roles[lane].getSelectedId(),static_cast<int>(relationships[lane].getValue()),static_cast<int>(dynamics[lane].getValue()),static_cast<int>(articulations[lane].getValue()),static_cast<int>(moves[lane].getValue()),static_cast<int>(weathers[lane].getValue()),lengths[lane].getSelectedId(),engine.loopSteps[lane].load(),engine.rhythmMode[lane].load(),engine.euclideanHits[lane].load(),engine.euclideanRotate[lane].load()};
  }
  void rememberPattern(int lane,bool discardForward){
   if(lane<0||lane>=Engine::maxTracks)return;
@@ -1234,6 +1271,7 @@ private:
   lengths[selectedTrack].setSelectedId(candidate.length);
   loopLengths[selectedTrack].setValue(candidate.loopSteps,juce::dontSendNotification);
   engine.setLoopSteps(selectedTrack,candidate.loopSteps);
+  setRhythmSettings(selectedTrack,candidate.rhythm,candidate.hits,candidate.rotation);
   engine.setTrackPattern(selectedTrack,candidate.phrase);
   status="Restored pattern "+juce::String(index+1)+" / "+juce::String(static_cast<int>(history.size()))+" on track "+juce::String(selectedTrack+1);
   repaint();
@@ -1492,6 +1530,7 @@ private:
   if(track>0){roles[track].setSelectedId(idea.role+1);relationships[track].setValue(idea.relationship);}
   dynamics[track].setValue(idea.dynamics);articulations[track].setValue(idea.articulation);
   moves[track].setValue(idea.motion);weathers[track].setValue(idea.texture);lengths[track].setSelectedId(idea.length+1);
+  setRhythmSettings(track,0,engine.euclideanHits[track].load(),engine.euclideanRotate[track].load());
   engine.setTrackPhrase(track,idea.midiPhrase(aiKey,aiScale));
   rememberPattern(track,true);
   status="AI idea applied to track "+juce::String(track+1)+"; use < Pattern to return";repaint();
@@ -1523,6 +1562,7 @@ private:
    }
    if(idea.form==1)mutes[lane].setToggleState(false,juce::sendNotification);
    rememberPattern(lane,true);
+   setRhythmSettings(lane,0,engine.euclideanHits[lane].load(),engine.euclideanRotate[lane].load());
    const int role=lane>0?idea.roleForFollower(lane-1):0;
    if(lane>0){
     roles[lane].setSelectedId(role+1);
@@ -1573,8 +1613,8 @@ private:
  int stepAt(juce::Point<float> p) const {const int noteWidth=std::max(10,(getWidth()-600)/Engine::steps);const int s=static_cast<int>((p.x-190)/noteWidth);return p.x>=190&&s>=0&&s<Engine::steps&&p.x<190+s*noteWidth+noteWidth-3?s:-1;}
  std::array<juce::TextButton,Engine::maxTracks> holds,mutes,solos,focuses;
  std::array<juce::ToggleButton,Engine::maxTracks> connects,sampleReverses;
- std::array<juce::ComboBox,Engine::maxTracks> kinds,sounds,sources,materials,playModes,roles,lengths,librarySounds,instruments;
- std::array<juce::Slider,Engine::maxTracks> levels,sends,colors,moves,weathers,relationships,dynamics,articulations,tails,sampleStarts,sampleSizes,sampleFades,loopLengths;
+ std::array<juce::ComboBox,Engine::maxTracks> kinds,sounds,sources,materials,playModes,roles,lengths,librarySounds,instruments,rhythms;
+ std::array<juce::Slider,Engine::maxTracks> levels,sends,colors,moves,weathers,relationships,dynamics,articulations,tails,sampleStarts,sampleSizes,sampleFades,loopLengths,rhythmHits,rhythmRotations;
  juce::String status;
  juce::AudioFormatManager audioFormats;
  juce::StringArray sampleDisplayNames,sampleGroups;
@@ -1977,6 +2017,7 @@ private:
   solos[lane].setToggleState(false,juce::dontSendNotification);
   connects[lane].setToggleState(false,juce::sendNotification);
   loopLengths[lane].setValue(Engine::steps,juce::dontSendNotification);engine.setLoopSteps(lane,Engine::steps);
+  setRhythmSettings(lane,0,5,0);
   juce::Random r;
   static constexpr int presets[][2]={{2,6},{2,3},{2,1},{4,2},{4,1},{1,4},{1,8},{1,3},{1,6}};
 
@@ -2877,7 +2918,7 @@ private:
  }
  juce::DynamicObject::Ptr makeStateObject(){
   juce::DynamicObject::Ptr root=new juce::DynamicObject();
-  root->setProperty("version",5);
+  root->setProperty("version",6);
   root->setProperty("trackCount",activeTrackCount);
   root->setProperty("selectedTrack",selectedTrack);
   root->setProperty("soloTrack",engine.soloTrack.load());
@@ -2899,7 +2940,7 @@ private:
    lane->setProperty("instrumentPlugin",!instrument.pending.isVoid()?instrument.pending:instrument.effect->saveState());
    lane->setProperty("kind",kinds[i].getSelectedId());lane->setProperty("sound",sounds[i].getSelectedId());
    if(kinds[i].getSelectedId()==3&&sounds[i].getSelectedId()>=2){const int index=sounds[i].getSelectedId()-2;if(index<sampleDisplayNames.size())lane->setProperty("soundName",sampleDisplayNames[index]);}
-	   lane->setProperty("source",sources[i].getSelectedId());lane->setProperty("material",materials[i].getSelectedId());lane->setProperty("playMode",playModes[i].getSelectedId());lane->setProperty("sampleStart",sampleStarts[i].getValue());lane->setProperty("sampleSize",sampleSizes[i].getValue());lane->setProperty("sampleFade",sampleFades[i].getValue());lane->setProperty("sampleReverse",sampleReverses[i].getToggleState());lane->setProperty("role",roles[i].getSelectedId());lane->setProperty("relationship",relationships[i].getValue());lane->setProperty("dynamics",dynamics[i].getValue());lane->setProperty("articulation",articulations[i].getValue());lane->setProperty("tail",tails[i].getValue());lane->setProperty("length",lengths[i].getSelectedId());lane->setProperty("loopSteps",static_cast<int>(loopLengths[i].getValue()));lane->setProperty("librarySound",librarySounds[i].getSelectedId());lane->setProperty("instrument",instruments[i].getSelectedId());
+	   lane->setProperty("source",sources[i].getSelectedId());lane->setProperty("material",materials[i].getSelectedId());lane->setProperty("playMode",playModes[i].getSelectedId());lane->setProperty("sampleStart",sampleStarts[i].getValue());lane->setProperty("sampleSize",sampleSizes[i].getValue());lane->setProperty("sampleFade",sampleFades[i].getValue());lane->setProperty("sampleReverse",sampleReverses[i].getToggleState());lane->setProperty("role",roles[i].getSelectedId());lane->setProperty("relationship",relationships[i].getValue());lane->setProperty("dynamics",dynamics[i].getValue());lane->setProperty("articulation",articulations[i].getValue());lane->setProperty("tail",tails[i].getValue());lane->setProperty("length",lengths[i].getSelectedId());lane->setProperty("loopSteps",static_cast<int>(loopLengths[i].getValue()));lane->setProperty("rhythm",engine.rhythmMode[i].load());lane->setProperty("hits",engine.euclideanHits[i].load());lane->setProperty("rotation",engine.euclideanRotate[i].load());lane->setProperty("librarySound",librarySounds[i].getSelectedId());lane->setProperty("instrument",instruments[i].getSelectedId());
    lane->setProperty("level",std::round(engine.level[i].load()*100.0f));lane->setProperty("fadeTarget",fadeTargets[i]);lane->setProperty("fadeSeconds",fadeDurations[i]);lane->setProperty("send",sends[i].getValue());lane->setProperty("color",colors[i].getValue());lane->setProperty("move",moves[i].getValue());lane->setProperty("weather",weathers[i].getValue());
    lane->setProperty("hold",holds[i].getToggleState());lane->setProperty("mute",mutes[i].getToggleState());
    lane->setProperty("connect",connects[i].getToggleState());
@@ -2922,6 +2963,7 @@ private:
     entry->setProperty("texture",candidate.texture);
     entry->setProperty("length",candidate.length);
     entry->setProperty("loopSteps",candidate.loopSteps);
+    entry->setProperty("rhythm",candidate.rhythm);entry->setProperty("hits",candidate.hits);entry->setProperty("rotation",candidate.rotation);
     history.add(juce::var(entry.get()));
    }
    lane->setProperty("patternHistory",juce::var(history));
@@ -3000,6 +3042,7 @@ private:
 	   if(lane->hasProperty("length"))lengths[i].setSelectedId(static_cast<int>(lane->getProperty("length")));
    const int savedLoopSteps=lane->hasProperty("loopSteps")?std::clamp(static_cast<int>(lane->getProperty("loopSteps")),1,Engine::maxLoopSteps):Engine::steps;
    loopLengths[i].setValue(savedLoopSteps,juce::dontSendNotification);engine.setLoopSteps(i,savedLoopSteps);
+   setRhythmSettings(i,lane->hasProperty("rhythm")?std::clamp(static_cast<int>(lane->getProperty("rhythm")),0,1):0,lane->hasProperty("hits")?static_cast<int>(lane->getProperty("hits")):5,lane->hasProperty("rotation")?static_cast<int>(lane->getProperty("rotation")):0);
    if(lane->hasProperty("librarySound"))librarySounds[i].setSelectedId(static_cast<int>(lane->getProperty("librarySound")),juce::dontSendNotification);
    if(lane->hasProperty("instrument"))instruments[i].setSelectedId(static_cast<int>(lane->getProperty("instrument")),juce::dontSendNotification);
    levels[i].setValue(lane->getProperty("level"));setManualTrackLevel(i,levels[i].getValue());
@@ -3028,6 +3071,9 @@ private:
       candidate.texture=entry!=nullptr&&entry->hasProperty("texture")?std::clamp(static_cast<int>(entry->getProperty("texture")),0,100):static_cast<int>(weathers[i].getValue());
       candidate.length=entry!=nullptr&&entry->hasProperty("length")?std::clamp(static_cast<int>(entry->getProperty("length")),1,4):std::clamp(lengths[i].getSelectedId(),1,4);
       candidate.loopSteps=entry!=nullptr&&entry->hasProperty("loopSteps")?std::clamp(static_cast<int>(entry->getProperty("loopSteps")),1,Engine::maxLoopSteps):savedLoopSteps;
+      candidate.rhythm=entry!=nullptr&&entry->hasProperty("rhythm")?std::clamp(static_cast<int>(entry->getProperty("rhythm")),0,1):0;
+      candidate.hits=entry!=nullptr&&entry->hasProperty("hits")?std::clamp(static_cast<int>(entry->getProperty("hits")),0,candidate.loopSteps):std::min(5,candidate.loopSteps);
+      candidate.rotation=entry!=nullptr&&entry->hasProperty("rotation")?std::clamp(static_cast<int>(entry->getProperty("rotation")),0,candidate.loopSteps-1):0;
       if(patternHistory[i].size()<24)patternHistory[i].push_back(candidate);
      }
     }
@@ -3188,7 +3234,7 @@ private:
   recordToggle.setTooltip("Show or hide sound capture, take management, and final export.");
   recordDone.setTooltip("Return to the instrument.");
   patternBack.setTooltip("Restore the previous generated pattern for the selected track.");
-  trackGenerate.setTooltip("Generate a new pattern for only the selected track, using its Role and Relationship.");
+  trackGenerate.setTooltip("Generate a new pattern for only the selected track. Euclidean keeps Hits and Rotate while choosing new pitches; followers use Role and Relationship.");
   trackActions.setTooltip("Rename or remove the selected track.");
   patternForward.setTooltip("Restore the next generated pattern for the selected track.");
   soundPrevious.setTooltip("Try the previous sound in this track's sound family. The notes keep playing.");
@@ -3197,7 +3243,7 @@ private:
   soundBack.setTooltip("Go back to a sound you tried on this track.");
   soundForward.setTooltip("Go forward through this track's tried sounds.");
   tempo.setTooltip("How fast the pattern moves, from 10 to 240 BPM.");
-  density.setTooltip("How many steps tend to be active when phrases are generated.");
+  density.setTooltip("How many steps tend to be active when Free phrases are generated. Euclidean tracks use their own exact Hits count.");
   key.setTooltip("Root note for generated phrases.");
   scale.setTooltip("Note collection used by generated phrases.");
   shape.setTooltip("The contour of new generated notes: wander, rise, fall, arch, still, or leap.");

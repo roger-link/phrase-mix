@@ -578,5 +578,72 @@ int main(){
  assert(wanderingDrone.getTrackPhrase(0)==anchor);
  assert(wanderingDrone.getTrackPhrase(2)==resting);
 
-	 std::cout<<"Engine checks passed: empty start, independent tracks, follower regeneration, linked drift, click toggles, shaped notes, sound browsing during playback, hold, evolve, solo audition, Focus restore, timed fades, silent pattern clock, live sample swap, concurrent pattern edits, slow tail, 10 BPM timing, connected notes, independent track loops, continuous and wandering drone, sample bed, sample shape, track effect stems, hosted MIDI source, audio bounds, stop\n";
+ // Every supported Euclidean rhythm has the exact count and balanced cyclic gaps.
+ for(int length=1;length<=Engine::maxLoopSteps;++length)for(int hits=0;hits<=length;++hits){
+  int count=0,first=-1,last=-1,minGap=length,maxGap=0;
+  for(int step=0;step<length;++step){
+   const bool active=Engine::euclideanStep(step,length,hits);
+   if(active){++count;if(first<0)first=step;else{minGap=std::min(minGap,step-last);maxGap=std::max(maxGap,step-last);}last=step;}
+   for(int rotation=0;rotation<length;++rotation)
+    assert(Engine::euclideanStep((step+rotation)%length,length,hits,rotation)==active);
+  }
+  assert(count==hits);
+  if(hits>0){const int wrap=length-last+first;minGap=std::min(minGap,wrap);maxGap=std::max(maxGap,wrap);assert(maxGap-minGap<=1);}
+ }
+ Engine euclid;euclid.seed(100);euclid.activeTracks=2;euclid.setLoopSteps(0,8);
+ euclid.setRhythm(0,1,3,0,true);
+ auto euclidPhrase=euclid.getTrackPattern(0);
+ for(int i=0;i<8;++i)assert((euclidPhrase[i]>=0)==(i==0||i==3||i==6));
+ // Rotation moves pitches with their onsets and is exactly reversible.
+ euclidPhrase.fill(-1);euclidPhrase[0]=60;euclidPhrase[3]=64;euclidPhrase[6]=67;
+ euclid.setTrackPattern(0,euclidPhrase);euclid.setRhythm(0,1,3,2,true);
+ auto rotated=euclid.getTrackPattern(0);assert(rotated[2]==60&&rotated[5]==64&&rotated[0]==67);
+ euclid.setRhythm(0,1,3,0,true);assert(euclid.getTrackPattern(0)==euclidPhrase);
+ for(int trial=0;trial<30;++trial){
+  euclid.density=trial%2?0.0f:1.0f;euclid.generateTrack(0);
+  const auto phrase=euclid.getTrackPattern(0);
+  for(int i=0;i<8;++i)assert((phrase[i]>=0)==Engine::euclideanStep(i,8,3));
+ }
+ // Followers keep their own exact timing even with an empty Main phrase.
+ euclid.setLoopSteps(1,13);euclid.setRhythm(1,1,5,12);
+ for(int trial=0;trial<2;++trial){
+  if(trial==1){std::array<int,Engine::maxLoopSteps> empty;empty.fill(-1);euclid.setTrackPattern(0,empty);}
+  euclid.generateTrack(1);const auto phrase=euclid.getTrackPattern(1);
+  for(int i=0;i<13;++i)assert((phrase[i]>=0)==Engine::euclideanStep(i,13,5,12));
+ }
+ euclid.copyTrackData(1,2);assert(euclid.rhythmMode[2]==1&&euclid.euclideanHits[2]==5&&euclid.euclideanRotate[2]==12);
+ assert(euclid.getTrackPattern(1)==euclid.getTrackPattern(2));
+ euclid.setLoopSteps(2,3);assert(euclid.euclideanHits[2]==3&&euclid.euclideanRotate[2]==0);
+ for(int i=0;i<3;++i)assert(euclid.getStep(2,i)>=0);
+ euclid.setLoopSteps(2,1);assert(euclid.euclideanHits[2]==1&&euclid.getStep(2,0)>=0);
+ euclid.clearTrack(2);assert(euclid.rhythmMode[2]==0&&euclid.euclideanHits[2]==5&&euclid.euclideanRotate[2]==0);
+ // Both evolution modes retain exact onsets, and Hold still freezes the track.
+ for(int modeValue:{1,2}){
+  Engine evolving;evolving.seed(222);evolving.prepare(8000);evolving.activeTracks=2;
+  evolving.render(l.data(),r.data(),512);evolving.setLoopSteps(0,13);evolving.setRhythm(0,1,5,4,true);
+  evolving.setLoopSteps(1,7);evolving.setRhythm(1,1,3,6,true);evolving.hold[1]=true;
+  const auto held=evolving.getTrackPattern(1);
+  evolving.mode=modeValue;evolving.every=1;evolving.bpm=240;evolving.playing=true;
+  for(int block=0;block<150;++block){
+   evolving.render(l.data(),r.data(),512);const auto phrase=evolving.getTrackPattern(0);
+   for(int i=0;i<13;++i)assert((phrase[i]>=0)==Engine::euclideanStep(i,13,5,4));
+   assert(evolving.getTrackPattern(1)==held);
+  }
+ }
+ // Setting zero hits releases a sounding MIDI note and remains silent on regeneration.
+ Engine silentEuclid;silentEuclid.prepare(8000);silentEuclid.activeTracks=1;
+ silentEuclid.render(l.data(),r.data(),512);silentEuclid.setLoopSteps(0,8);silentEuclid.setRhythm(0,1,3,0,true);
+ silentEuclid.midiOutputTrack=0;silentEuclid.bpm=240;silentEuclid.playing=true;
+ silentEuclid.render(l.data(),r.data(),1,&loopEvents);assert(loopEvents.count>0&&loopEvents.items[0].on);
+ silentEuclid.setRhythm(0,1,0,7,true);silentEuclid.generateTrack(0);
+ bool released=false;
+ for(int block=0;block<20;++block){
+  silentEuclid.render(l.data(),r.data(),512,&loopEvents);
+  for(int i=0;i<loopEvents.count;++i){assert(!loopEvents.items[i].on);released=true;}
+ }
+ assert(released);
+ const auto silentPhrase=silentEuclid.getTrackPattern(0);
+ for(int i=0;i<8;++i)assert(silentPhrase[i]<0);
+
+	 std::cout<<"Engine checks passed: empty start, independent tracks, follower regeneration, linked drift, click toggles, shaped notes, sound browsing during playback, hold, evolve, solo audition, Focus restore, timed fades, silent pattern clock, live sample swap, concurrent pattern edits, slow tail, 10 BPM timing, connected notes, independent track loops, Euclidean counts/rotation/evolution/MIDI release, continuous and wandering drone, sample bed, sample shape, track effect stems, hosted MIDI source, audio bounds, stop\n";
 }

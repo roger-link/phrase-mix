@@ -59,7 +59,7 @@ public:
     std::atomic<uint32_t> hostedInstrumentMask{0};
     std::atomic<bool> midiResetRequested{false};
     std::array<std::atomic<bool>,maxTracks> hold{}, mute{}, connect{};
-    std::array<std::atomic<int>,maxTracks> sourceType, material, noteLength, loopSteps, sampleChoice, instrumentChoice, samplePlayMode, role;
+    std::array<std::atomic<int>,maxTracks> sourceType, material, noteLength, loopSteps, rhythmMode, euclideanHits, euclideanRotate, sampleChoice, instrumentChoice, samplePlayMode, role;
     std::array<std::atomic<float>,maxTracks> level, send, color, move, weather, relationship, dynamics, articulation, tail, sampleStart, sampleSize, sampleFade;
     std::array<std::atomic<float>,maxTracks> browseGain;
     std::array<std::atomic<unsigned>,maxTracks> soundRevision;
@@ -112,6 +112,7 @@ public:
             material[i].store(i%4==2?5:(i%4==3?3:i%4));
             noteLength[i].store(i==0?1:(i==1?0:2));
             loopSteps[i].store(steps);
+            rhythmMode[i].store(0);euclideanHits[i].store(5);euclideanRotate[i].store(0);
             sampleChoice[i].store(-1);
             instrumentChoice[i].store(0);
             samplePlayMode[i].store(0);
@@ -195,13 +196,35 @@ public:
         if(track<0||track>=maxTracks)return;
         const PatternGuard guard(*this);
         loopSteps[track].store(std::clamp(count,1,maxLoopSteps));
+        euclideanHits[track].store(std::clamp(euclideanHits[track].load(),0,loopSteps[track].load()));
+        euclideanRotate[track].store(euclideanRotate[track].load()%loopSteps[track].load());
+        if(rhythmMode[track].load()==1)applyEuclideanInternal(track);
         droneHomes[static_cast<size_t>(track)]=uniformNote(parts[track],loopSteps[track].load());
+    }
+    // A balanced circular distribution, anchored at step zero before rotation.
+    static bool euclideanStep(int step,int length,int hits,int rotation=0){
+        length=std::clamp(length,1,maxLoopSteps);hits=std::clamp(hits,0,length);
+        const int index=((step-rotation)%length+length)%length;
+        return (index*hits)%length<hits;
+    }
+    void setRhythm(int track,int modeValue,int hits,int rotation,bool apply=false){
+        if(track<0||track>=maxTracks)return;
+        const PatternGuard guard(*this);
+        const int length=loopSteps[track].load();
+        // Preserve melodic order relative to the old rotation.
+        const int oldRotation=euclideanRotate[track].load();
+        rhythmMode[track].store(modeValue==1?1:0);
+        euclideanHits[track].store(std::clamp(hits,0,length));
+        euclideanRotate[track].store(((rotation%length)+length)%length);
+        if(apply&&modeValue==1)applyEuclideanInternal(track,oldRotation);
+        refreshDisplay();
     }
     void copyTrackData(int from,int to) {
         const PatternGuard guard(*this);
         from=std::clamp(from,0,maxTracks-1);to=std::clamp(to,0,maxTracks-1);
         parts[static_cast<size_t>(to)]=parts[static_cast<size_t>(from)];
         loopSteps[to].store(loopSteps[from].load());
+        rhythmMode[to].store(rhythmMode[from].load());euclideanHits[to].store(euclideanHits[from].load());euclideanRotate[to].store(euclideanRotate[from].load());
         droneHomes[static_cast<size_t>(to)]=droneHomes[static_cast<size_t>(from)];
         refreshDisplay();
     }
@@ -210,6 +233,7 @@ public:
         track=std::clamp(track,0,maxTracks-1);
         parts[static_cast<size_t>(track)].fill(-1);
         loopSteps[track].store(steps);
+        rhythmMode[track].store(0);euclideanHits[track].store(5);euclideanRotate[track].store(0);
         droneHomes[static_cast<size_t>(track)]=-1;
         refreshDisplay();
     }
@@ -767,7 +791,38 @@ private:
         for(int c=0;c<trackCount;++c)if(!hold[c].load())generateTrackInternal(c);
         refreshDisplay();
     }
+    void applyEuclideanInternal(int track,int oldRotation=-1){
+        const int length=loopSteps[track].load();
+        const int rotation=euclideanRotate[track].load();
+        if(oldRotation<0)oldRotation=rotation;
+        std::array<int,maxLoopSteps> notes{};int count=0;
+        for(int i=0;i<length;++i){
+            const int note=parts[track][(i+oldRotation)%length];
+            if(note>=0)notes[count++]=note;
+        }
+        std::fill_n(parts[track].begin(),length,-1);
+        int ordinal=0,previous=-1;
+        for(int i=0;i<length;++i)if(euclideanStep(i,length,euclideanHits[track].load())){
+            const int index=(i+rotation)%length;
+            const int note=count>0?notes[ordinal%count]:noteForStep(index,previous);
+            parts[track][index]=note;previous=note;++ordinal;
+        }
+        droneHomes[static_cast<size_t>(track)]=uniformNote(parts[track],length);
+        refreshDisplay();
+    }
+    void generateEuclideanTrack(int track){
+        const int length=loopSteps[track].load();int previous=-1;
+        const float distance=std::clamp(relationship[track].load(),0.f,1.f);
+        const int mainLength=loopSteps[0].load();
+        const bool mainHasNotes=track>0&&std::any_of(parts[0].begin(),parts[0].begin()+mainLength,[](int n){return n>=0;});
+        for(int j=0;j<length;++j){
+            if(!euclideanStep(j,length,euclideanHits[track].load(),euclideanRotate[track].load())){parts[track][j]=-1;continue;}
+            parts[track][j]=mainHasNotes?relatedNoteFromMain(nearestMainNote(j%mainLength),track,j,distance,std::clamp(role[track].load(),0,3),previous):noteForStep(j,previous);
+            previous=parts[track][j];
+        }
+    }
     void generateTrackInternal(int track){
+        if(rhythmMode[track].load()==1){generateEuclideanTrack(track);return;}
         if(track>0){
             generateFollowerTrack(track);
             return;
@@ -867,6 +922,7 @@ private:
                 continue;
             }
             droneHomes[static_cast<size_t>(c)]=-1;
+            if(rhythmMode[c].load()==1)applyEuclideanInternal(c);
             const auto original=parts[c];
             generateTrackInternal(c);
             const auto candidate=parts[c];

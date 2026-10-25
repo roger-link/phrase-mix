@@ -59,6 +59,12 @@ These checks cover generation and audio-engine behavior. They do not replace lis
 
 Select a track and set `Loop steps` beside its pattern controls to any value from 1 to 64. For example, use 5 steps on one track and 64 on another: each track repeats independently. When any track is longer than 16 steps, `Page` shows and edits one 16-step section at a time across all tracks. Its default `Follow` setting changes pages with the selected track's playhead; choose a numbered page to hold the view for editing. A page change does not alter playback. Tiles beyond a track's loop are dimmed and retain their notes if you lengthen it again. New pages are empty until you add notes or generate a new pattern. `Note length` remains a separate control for how long each note rings. Change Every still counts 16-step cycles. Loop steps and all pages are saved with Pieces and Keeps and copied by Clone.
 
+## Test Euclidean rhythms
+
+Select a track and change Rhythm from Free to Euclidean. Loop steps is the cycle length (1–64); Hits is the exact number of onsets (0–Loop steps); Rotate moves the entire rhythm right, wrapping at the end. Try Loop steps 8, Hits 3, Rotate 0: steps 1, 4, and 7 play. Rotate 1 moves those notes to steps 2, 5, and 8. These changes apply immediately and preserve the melodic notes in sequence; changing Hits repeats or trims that sequence as needed. Zero hits is silent.
+
+Generate track and Renew choose new pitches while preserving Euclidean timing. Drift changes pitches gradually without changing the hit positions. Density affects Free tracks; followers in Euclidean mode still derive pitches from Main using Role and Relationship. Hold excludes a track from automatic changes and Generate all; explicit selected-track edits still apply. Clicking a step or applying an AI idea returns the affected track to Free timing. Pattern history restores notes and rhythm settings together. Clone, Pieces, and Keeps preserve the settings; older saves open in Free mode.
+
 ## Test AI idea
 
 When the on-device model is available, select a track, press `AI idea` beside its pattern controls, enter a short musical direction, and press `Create idea`. When a valid suggestion arrives, Phrase Mix changes only that track's notes and expression controls. The suggested note count keeps busy model output from filling every step. Use `< Pattern` to return to the previous candidate.
