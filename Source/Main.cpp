@@ -2442,11 +2442,23 @@ private:
   auto* dialog=new juce::AlertWindow(replace<0?"Add backing track":"Backing timing",
    (timing.canAlign()?"Recorded timing is available. Restore it to align new patterns with the recording.":"This recording has no reliable steady-tempo timing. Enter its original BPM if known; start step 0 assumes it began on the first beat.")
    +juce::String(replace<0?"\nAdds the complete recording as a new track and mutes existing tracks. You can unmute them individually.":"\nTiming applies to the whole Piece. The audio always plays at its original speed."),juce::MessageBoxIconType::NoIcon);
-  dialog->addTextEditor("bpm",timing.canAlign()?juce::String(timing.bpm,3):juce::String(),"Original BPM (optional)");
+  dialog->addTextEditor("bpm",timing.canAlign()?juce::String(timing.bpm,3):juce::String(),"Original BPM (10-240; required to use timing)");
   dialog->addTextEditor("start",timing.canAlign()?juce::String(timing.startStep,6):juce::String("0"),"Starting step (optional; 0 = beginning)");
   dialog->addButton(replace<0?"Add + use timing":"Use timing",1,timing.canAlign()?juce::KeyPress(juce::KeyPress::returnKey):juce::KeyPress());
   dialog->addButton(replace<0?"Add only":"Keep current timing",2,!timing.canAlign()?juce::KeyPress(juce::KeyPress::returnKey):juce::KeyPress());
   dialog->addButton("Cancel",0,juce::KeyPress(juce::KeyPress::escapeKey));
+  auto validateTiming=[dialog]{
+   const auto bpmText=dialog->getTextEditorContents("bpm").trim();
+   const auto stepText=dialog->getTextEditorContents("start").trim();
+   const auto isNumber=[](const juce::String& text){return text.isNotEmpty()&&text.containsOnly("0123456789.")&&text.containsAnyOf("0123456789")&&text.indexOfChar('.')==text.lastIndexOfChar('.');};
+   TakeTiming value;value.bpm=bpmText.getDoubleValue();value.startStep=stepText.getDoubleValue();value.steady=true;value.startedPlaying=true;
+   const bool valid=isNumber(bpmText)&&(stepText.isEmpty()||isNumber(stepText))&&value.canAlign();
+   dialog->getButton(0)->setEnabled(valid);
+   dialog->getButton(0)->setTooltip(valid?"Use the original BPM and starting step for this Piece.":"Enter a BPM from 10 to 240 and a valid starting step, or keep the current timing.");
+  };
+  dialog->getTextEditor("bpm")->onTextChange=validateTiming;
+  dialog->getTextEditor("start")->onTextChange=validateTiming;
+  validateTiming();
   const juce::Component::SafePointer<MainView> safe(this);
   const auto piece=pieceId;const auto replacedName=replace>=0?trackNames[replace]:juce::String();
   dialog->enterModalState(true,juce::ModalCallbackFunction::create([safe,dialog,file,replace,piece,replacedName,timing](int result){
