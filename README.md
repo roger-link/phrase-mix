@@ -11,7 +11,8 @@ This is an evolving JUCE/C++ prototype, not a signed or notarized release.
 - Optional on-device AI ideas for one track's phrase and expression, or for a whole arrangement with complementary tracks.
 - Built-in synthesis, mapped instruments, bundled samples, microphone captures, and takes turned into sounds.
 - Per-track expression and shaping, shared space and mix controls, Pieces for editable saves, and Keeps for non-overwriting snapshots.
-- Stereo take recording and trimmed, normalized final WAV export.
+- Stereo take recording with BPM and start-position metadata, and trimmed, normalized final WAV export.
+- Full-length stereo backing tracks for layering over saved takes, with original-speed playback, optional looping, and timing restoration.
 - A hosted AU/VST3 instrument source per track, followed by two ordered audio effect slots; a whole-piece effect follows the mix. Plugin settings are saved in Pieces and Keeps.
 - Opt-in stereo audio return from the selected two-channel input, monitored through Phrase Mix and included in takes.
 - MIDI Learn for connected input controllers: CC faders/knobs for track levels and expression, and CC buttons or notes for track actions, pattern navigation, Keep, and transport. Mappings persist across Pieces.
@@ -49,6 +50,8 @@ c++ -std=c++17 -O2 tests/midi_output_test.cpp -o /tmp/phrase-mix-midi-output-tes
 /tmp/phrase-mix-midi-output-test
 c++ -std=c++17 -O2 tests/audio_return_test.cpp -o /tmp/phrase-mix-audio-return-test
 /tmp/phrase-mix-audio-return-test
+c++ -std=c++17 -O2 tests/backing_track_test.cpp -o /tmp/phrase-mix-backing-test
+/tmp/phrase-mix-backing-test
 c++ -std=c++17 -O2 tests/apple_idea_test.cpp -o /tmp/phrase-mix-apple-idea-test
 /tmp/phrase-mix-apple-idea-test
 ```
@@ -76,6 +79,16 @@ For a broader change, make a Keep first, then press `AI piece` by the tempo cont
 Choose `MIDI > Send notes to > Phrase Mix virtual port` and `MIDI > Send from > Track 1`. In the receiving music app, select `Phrase Mix` as its MIDI input and load a software instrument. Start Phrase Mix playback. The virtual port carries notes only; the other app plays its own audio through the Mac output. `All tracks` sends tracks 1-8 on channels 1-8. Phrase Mix takes do not include the other app's audio.
 
 To connect separate standalone synths, choose `MIDI > Send notes to > Separate track ports (1-8)`. Each synth selects one input, such as `Phrase Mix Track 1` or `Phrase Mix Track 2`. Each port sends on channel 1. The existing shared port remains available when a host can route channels itself.
+
+## Layer over a recorded take
+
+Open the original Piece, then Record / Finish. Select its take and press Add backing track. Add + use timing restores the recorded BPM and fractional starting step, adds a new Backing track, and mutes existing tracks so they do not double the recording. Add only keeps the current Piece timing. Older takes have no timing metadata: enter the original BPM if known or choose Add only, then use Timing on the backing track to adjust it later. Zero starting step means the first beat; one step is a sixteenth note. BPM supports decimal values. Steady tempo and a shared starting position are needed for rhythmic alignment; there is no time stretching or tempo-map playback.
+
+The Backing inspector offers Choose audio for complete WAV, AIFF, or other supported files, Timing, and Loop recording. Playback starts the audio at its beginning whenever Play starts; Stop then Play restarts it. Loop is off by default and repeats the exact file length when enabled, so use complete bars for a repeating rhythmic bed. Backing tracks retain their stereo channels, speed, and pitch, ignore note generation and MIDI note output, and support track level, mute, solo, Focus, timed fades, and their two effects. The recording bypasses the whole-piece mix processing already baked into the take. New layers still use the normal sound and mix path, and a new recorded take includes both. Track slots are shared with the eight-track limit.
+
+Backing audio is copied into the Piece's Backing Tracks folder; adding it never changes the original take. Pieces save references and Keeps copy the backing audio, including when recalled into another Piece. Missing audio remains silent and can be relinked with Choose audio. Full recordings are loaded into memory, so available memory limits very long files; they are never silently shortened.
+
+New takes write a neighboring `.timing.json` file with their starting BPM, exact transport step, and whether timing remained steady. Record take starts playback from the Piece's starting position if stopped; while already playing it records the actual current phase. A stop/restart or tempo change during recording marks timing as unreliable for automatic alignment. Take renaming carries the metadata, and final exports adjust the starting step for the selected trim. Keep a recording's timing file with it when moving files outside the app.
 
 ## Test external audio return
 

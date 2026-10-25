@@ -56,7 +56,12 @@ public:
     std::atomic<float> focusFadeSeconds{1.5f};
     std::atomic<bool> playing{false};
     std::atomic<int> midiOutputTrack{-2}; // -2 off, -1 all tracks, otherwise one track.
-    std::atomic<uint32_t> hostedInstrumentMask{0};
+    std::atomic<uint32_t> hostedInstrumentMask{0},backingTrackMask{0};
+    std::atomic<double> transportStartStep{0};
+    // Audio-thread snapshot for recording metadata and backing-track playback.
+    double blockStartSeconds=0,blockStartStep=0;
+    float blockTempo=96;
+    bool blockPlaying=false,blockRestarted=false;
     std::atomic<bool> midiResetRequested{false};
     std::array<std::atomic<bool>,maxTracks> hold{}, mute{}, connect{};
     std::array<std::atomic<int>,maxTracks> sourceType, material, noteLength, loopSteps, rhythmMode, euclideanHits, euclideanRotate, sampleChoice, instrumentChoice, samplePlayMode, role;
@@ -129,7 +134,7 @@ public:
         droneHomes.fill(-1);
     }
     void prepare(double rate,int blockSize=512) {
-        sampleRate=rate; samplesLeft=0; position=-1; tick=-1; cycles=0;
+        transportSeconds=0;sampleRate=rate; samplesLeft=0; position=-1; tick=-1; cycles=0;
         for(auto& head:lanePlayheads)head.store(-1);
         for(int c=0;c<maxTracks;++c){stemLeft[c].resize(static_cast<size_t>(blockSize));stemRight[c].resize(static_cast<size_t>(blockSize));}
         for(int c=0;c<maxTracks;++c){voices[c]=Voice{};lastSoundRevision[c]=soundRevision[c].load();}
@@ -294,7 +299,19 @@ public:
             lastMidiRoute=route;
         }
         advanceTrackFades(count,run);
-        if(run&&!running){position=-1;tick=-1;samplesLeft=0;cycles=0;}
+        blockTempo=std::clamp(bpm.load(),10.f,240.f);
+        const double blockInterval=sampleRate*60.0/blockTempo/4.0;
+        blockRestarted=run&&!running;
+        if(blockRestarted){
+            const double start=std::clamp(transportStartStep.load(),0.0,1.0e12);
+            const auto whole=static_cast<int64_t>(std::floor(start));
+            const double fraction=start-static_cast<double>(whole);
+            position=-1;tick=fraction>0.0000001?whole:whole-1;
+            samplesLeft=fraction>0.0000001?(1.0-fraction)*blockInterval:0;cycles=0;transportSeconds=0;
+        }
+        blockPlaying=run;blockStartSeconds=transportSeconds;
+        blockStartStep=run?static_cast<double>(tick+1)-samplesLeft/blockInterval:transportStartStep.load();
+        if(run)transportSeconds+=static_cast<double>(count)/sampleRate;
         running=run;
         if(!run){playhead.store(-1);for(auto& head:lanePlayheads)head.store(-1);}
         std::array<float,maxTracks> gains{},sends{},colors{},moves{},weathers{};
@@ -390,6 +407,10 @@ public:
             if(run)samplesLeft-=1;
             float dry=0, bus=0, leftMix=0, rightMix=0;
             if(run)for(int c=0;c<trackCount;++c){auto& v=voices[c];
+                if(backingTrackMask.load()&(1u<<c)){
+                    if(trackProcessor!=nullptr){stemLeft[c][static_cast<size_t>(s)]=0;stemRight[c][static_cast<size_t>(s)]=0;}
+                    continue;
+                }
                 if(hosted&(1u<<c)){
                     mixGains[c]+=(gains[c]-mixGains[c])*gainSlew;
                     focusGains[c]+=(static_cast<float>(focus<0||c==focus)-focusGains[c])*focusSlew;
@@ -584,7 +605,7 @@ private:
         const int solo=soloTrack.load();
         const int trackCount=std::clamp(activeTracks.load(),0,maxTracks);
         for(int c=0;c<maxTracks;++c)if(midiNotes[c]>=0){
-            if(c>=trackCount||((route==-2||(route>=0&&route!=c))&&!(hosted&(1u<<c)))||(solo>=0&&solo!=c)||mute[c].load()||level[c].load()<=0.0001f||--midiSamplesLeft[c]<=0){
+            if(c>=trackCount||(backingTrackMask.load()&(1u<<c))||((route==-2||(route>=0&&route!=c))&&!(hosted&(1u<<c)))||(solo>=0&&solo!=c)||mute[c].load()||level[c].load()<=0.0001f||--midiSamplesLeft[c]<=0){
                 events.add(sample,c,midiNotes[c],0,false);midiNotes[c]=-1;midiSamplesLeft[c]=0;
             }
         }
@@ -597,7 +618,7 @@ private:
         const int trackCount=std::clamp(activeTracks.load(),0,maxTracks);
         constexpr double lengthBeats[]={0.25,1.0,2.0,4.0};
         for(int c=0;c<trackCount;++c){
-            if(((route==-2||(route>=0&&route!=c))&&!(hosted&(1u<<c)))||(solo>=0&&solo!=c)||mute[c].load()||level[c].load()<=0.0001f)continue;
+            if((backingTrackMask.load()&(1u<<c))||((route==-2||(route>=0&&route!=c))&&!(hosted&(1u<<c)))||(solo>=0&&solo!=c)||mute[c].load()||level[c].load()<=0.0001f)continue;
             const int lengthSteps=std::clamp(loopSteps[c].load(),1,maxLoopSteps);
             const int lanePosition=static_cast<int>(tick%lengthSteps);
             const int next=parts[c][lanePosition];
@@ -676,7 +697,7 @@ private:
     std::atomic<uint32_t> rng{0x8abc0123};
     std::atomic<bool> restartRequested{false};
     unsigned lastRequest=0;
-    double sampleRate=48000,samplesLeft=0;
+    double sampleRate=48000,samplesLeft=0,transportSeconds=0;
     float filterState=0;
     int position=-1,cycles=0;
     int64_t tick=-1;
@@ -822,6 +843,7 @@ private:
         }
     }
     void generateTrackInternal(int track){
+        if(backingTrackMask.load()&(1u<<track))return;
         if(rhythmMode[track].load()==1){generateEuclideanTrack(track);return;}
         if(track>0){
             generateFollowerTrack(track);
@@ -914,7 +936,7 @@ private:
             ++audibleDrones;
             if(firstDrone<0)firstDrone=c;
         }
-        for(int c=0;c<trackCount;++c)if(!hold[c].load()){
+        for(int c=0;c<trackCount;++c)if(!hold[c].load()&&!(backingTrackMask.load()&(1u<<c))){
             const int length=std::clamp(loopSteps[c].load(),1,maxLoopSteps);
             const int droneNote=connect[c].load()?uniformNote(parts[c],length):-1;
             if(droneNote>=0){
@@ -955,6 +977,7 @@ private:
         const int solo=soloTrack.load();
         for(int c=0;c<trackCount;++c){
             auto& v=voices[c];
+            if(backingTrackMask.load()&(1u<<c)){lanePlayheads[c].store(-1);continue;}
             const int lengthSteps=std::clamp(loopSteps[c].load(),1,maxLoopSteps);
             const int lanePosition=static_cast<int>(tick%lengthSteps);
             lanePlayheads[c].store(lanePosition);

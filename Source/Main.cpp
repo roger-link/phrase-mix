@@ -3,6 +3,7 @@
 #include "HelpView.h"
 #include "MidiMapping.h"
 #include "AudioReturn.h"
+#include "BackingTrack.h"
 #include "PluginEffect.h"
 #include "AppleIdea.h"
 #include "AIPieceSounds.h"
@@ -82,6 +83,10 @@ public:
   addAndMakeVisible(editInstrument);editInstrument.setButtonText("Edit");editInstrument.onClick=[this]{showInstrumentEditor();};
   addAndMakeVisible(removeInstrument);removeInstrument.setButtonText("Remove");removeInstrument.onClick=[this]{clearInstrument(selectedTrack);};
   refreshInstrumentControls();
+  addAndMakeVisible(chooseBacking);chooseBacking.setButtonText("Choose audio...");chooseBacking.onClick=[this]{chooseBackingAudio();};
+  addAndMakeVisible(backingTiming);backingTiming.setButtonText("Timing...");backingTiming.onClick=[this]{if(selectedTrack>=0)showAddBackingDialog(backingFiles[selectedTrack],selectedTrack);};
+  chooseBacking.setTooltip("Load a complete WAV, AIFF, or supported audio file as a stereo backing track.");
+  backingTiming.setTooltip("Enter or restore the recording's original BPM and starting step. This does not stretch audio.");
   addAndMakeVisible(monitorReturn);monitorReturn.setButtonText("Return");monitorReturn.setClickingTogglesState(true);
   monitorReturn.setColour(juce::TextButton::buttonOnColourId,juce::Colour(0xff3e6851));
   monitorReturn.onClick=[this]{setAudioReturnEnabled(monitorReturn.getToggleState());};
@@ -130,6 +135,7 @@ public:
   addAndMakeVisible(takeName);takeName.setSelectAllWhenFocused(true);takeName.onReturnKey=[this]{renameSelectedTake();};
   addAndMakeVisible(renameTake);renameTake.setButtonText("Rename");renameTake.onClick=[this]{renameSelectedTake();};
   addAndMakeVisible(deleteTake);deleteTake.setButtonText("Delete");deleteTake.onClick=[this]{confirmDeleteSelectedTake();};
+  addAndMakeVisible(addTakeBacking);addTakeBacking.setButtonText("Add backing track");addTakeBacking.onClick=[this]{showAddBackingDialog(selectedTakeFile());};
   addAndMakeVisible(useTakeSound);useTakeSound.setButtonText("Turn into sound");useTakeSound.onClick=[this]{useSelectedTakeAsSound();};
   addAndMakeVisible(exportFinal);exportFinal.setButtonText("Export final");exportFinal.onClick=[this]{exportFinalTake();};
   addAndMakeVisible(useLastSound);useLastSound.setButtonText("Use last");useLastSound.onClick=[this]{useLastRecording();};
@@ -147,6 +153,7 @@ public:
    juce::DialogWindow::LaunchOptions options;options.dialogTitle="Audio settings";options.dialogBackgroundColour=juce::Colour(0xff222727);options.content.setOwned(content.release());options.useNativeTitleBar=true;options.resizable=false;options.launchAsync();
   };
   setupSlider(tempo,10,240,96,[this]{engine.bpm=static_cast<float>(tempo.getValue());});
+  tempo.setRange(10,240,0.001);tempo.setTextBoxStyle(juce::Slider::TextBoxRight,false,66,24);
   tempo.setSkewFactorFromMidPoint(70);
   setupSlider(density,20,100,65,[this]{engine.density=static_cast<float>(density.getValue()/100);});
   addAndMakeVisible(key);const char* keys[]={"C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"};for(int i=0;i<12;++i)key.addItem(keys[i],i+1);key.setSelectedId(3);key.onChange=[this]{engine.key=key.getSelectedId()-1;};
@@ -160,7 +167,7 @@ public:
   }
   for(int i=0;i<Engine::maxTracks;++i){
    addAndMakeVisible(kinds[i]);
-   kinds[i].addItem("Made",1);kinds[i].addItem("Instruments",2);kinds[i].addItem("Samples",3);kinds[i].addItem("Strange",4);kinds[i].addItem("Plugin",5);
+   kinds[i].addItem("Made",1);kinds[i].addItem("Instruments",2);kinds[i].addItem("Samples",3);kinds[i].addItem("Strange",4);kinds[i].addItem("Plugin",5);kinds[i].addItem("Backing",6);
    kinds[i].setSelectedId(i==2?4:(i==3?3:1));
    kinds[i].onChange=[this,i]{refreshSoundMenu(i,false,false);queueSoundChoice(i,true);};
    addAndMakeVisible(sounds[i]);
@@ -223,6 +230,8 @@ public:
     button.setColour(juce::TextButton::textColourOffId,juce::Colour(0xffc1cbc5));
     button.setColour(juce::TextButton::textColourOnId,juce::Colour(0xfff5f8f5));
    };
+   addAndMakeVisible(backingLoops[i]);backingLoops[i].setButtonText("Loop recording");backingLoops[i].onClick=[this,i]{backingLoopFlags[i]=backingLoops[i].getToggleState();};
+   backingLoops[i].setTooltip("Repeat the complete recording at its original speed. Off plays it once from the beginning.");
    addAndMakeVisible(holds[i]);setupRowToggle(holds[i],"Hold",juce::Colour(0xff3e6851));holds[i].onClick=[this,i]{engine.hold[i]=holds[i].getToggleState();engine.refreshFollowers=true;repaint();};
    addAndMakeVisible(mutes[i]);setupRowToggle(mutes[i],"Mute",juce::Colour(0xff765047));mutes[i].onClick=[this,i]{engine.mute[i]=mutes[i].getToggleState();repaint();};
    addAndMakeVisible(solos[i]);setupRowToggle(solos[i],"Solo",juce::Colour(0xff3f6575));solos[i].onClick=[this,i]{setSoloTrack(solos[i].getToggleState()?i:-1);};
@@ -271,6 +280,7 @@ public:
  void prepareToPlay(int samplesPerBlock,double rate) override {
   engine.prepare(rate,samplesPerBlock);captureSampleRate.store(rate);midiBlock.ensureSize(8192);for(auto& block:trackMidiBlocks)block.ensureSize(2048);
   returnBuffer.setSize(2,std::max(1,samplesPerBlock),false,false,true);
+  backingAudio.prepare(samplesPerBlock);
   pluginEffect.prepare(rate,samplesPerBlock);
   for(auto& chain:trackEffectSlots)for(auto& slot:chain)slot.effect->prepare(rate,samplesPerBlock);
   for(auto& slot:trackInstruments)slot.effect->prepare(rate,samplesPerBlock);
@@ -315,7 +325,7 @@ public:
       notes.addEvent(event.on?juce::MidiMessage::noteOn(1,event.note,static_cast<juce::uint8>(event.velocity)):juce::MidiMessage::noteOff(1,event.note),event.sample);}
      view->trackInstruments[track].effect->process(left,right,count,&notes);
     }
-    for(auto& slot:view->trackEffectSlots[track])slot.effect->process(left,right,count);
+    if(!(view->engine.backingTrackMask.load()&(1u<<track)))for(auto& slot:view->trackEffectSlots[track])slot.effect->process(left,right,count);
    }:nullptr,this);
   if(info.buffer->getNumChannels()>1)
    pluginEffect.process(info.buffer->getWritePointer(0,info.startSample),info.buffer->getWritePointer(1,info.startSample),info.numSamples);
@@ -340,6 +350,18 @@ public:
     trackMidiOutputs[static_cast<size_t>(track)]->sendBlockOfMessages(trackMidiBlocks[static_cast<size_t>(track)],start,captureSampleRate.load());
    }
   }
+  std::array<BackingTracks::Controls,Engine::maxTracks> backingControls{};
+  const auto backingMask=engine.backingTrackMask.load();
+  const int backingSolo=engine.soloTrack.load(),backingFocus=backingSolo>=0?-1:engine.focusTrack.load();
+  for(int track=0;track<Engine::maxTracks;++track){
+   auto& control=backingControls[track];control.active=(backingMask&(1u<<track))!=0;
+   control.loop=backingLoopFlags[track].load();control.level=engine.level[track].load();
+   control.audible=backingSolo>=0?backingSolo==track:!engine.mute[track].load();
+   control.focused=backingFocus<0||backingFocus==track;
+  }
+  backingAudio.render(info.buffer->getWritePointer(0,info.startSample),info.buffer->getNumChannels()>1?info.buffer->getWritePointer(1,info.startSample):nullptr,
+   info.numSamples,engine.blockStartSeconds,captureSampleRate.load(),engine.blockPlaying,engine.blockRestarted,backingControls,engine.focusFadeSeconds.load(),
+   [](void* context,int track,float* left,float* right,int count){auto* view=static_cast<MainView*>(context);for(auto& slot:view->trackEffectSlots[track])slot.effect->process(left,right,count);},this);
   renderTakePlayback(info);
   if(addReturn){
    const float peak=mixStereoReturn(info.buffer->getWritePointer(0,info.startSample),info.buffer->getWritePointer(1,info.startSample),returnBuffer.getReadPointer(0),returnBuffer.getReadPointer(1),info.numSamples,audioReturnGain.load());
@@ -348,6 +370,7 @@ public:
   for(int c=2;c<info.buffer->getNumChannels();++c)info.buffer->clear(c,info.startSample,info.numSamples);
   mixWriterInCallback.store(true);
   if(recordingMix.load()){
+   recordingTiming.observe(engine.blockTempo,engine.blockStartStep,engine.blockPlaying,info.numSamples,mixRecordSampleRate);
    const float* left=info.buffer->getReadPointer(0,info.startSample);
    const float* right=info.buffer->getNumChannels()>1?info.buffer->getReadPointer(1,info.startSample):left;
    const float* channels[]{left,right};
@@ -391,6 +414,11 @@ public:
   for(int c=0;c<activeTrackCount;++c){int y=sequenceTop+c*sequenceRowHeight;g.setColour(juce::Colour(engine.mute[c].load()&&engine.soloTrack.load()!=c?0xff1b2121:(c==engine.soloTrack.load()?0xff293d45:(c==selectedTrack?0xff26352f:0xff1e2423))));g.fillRoundedRectangle(16.f,static_cast<float>(y-1),static_cast<float>(getWidth()-32),32.f,6.f);
    if(c==selectedTrack){g.setColour(juce::Colour(0xff8fbda3));g.fillRect(16,y+3,3,24);}
    g.setColour(juce::Colour(0xff43514a));g.fillRect(getWidth()-238,y+3,1,26);
+   if(kinds[c].getSelectedId()==6){
+    g.setColour(juce::Colour(0xff94bba4));g.setFont(12.f);
+    g.drawText(backingClips[c]?"Backing - "+timeText(backingClips[c]->duration())+(backingLoopFlags[c].load()?" - Loop":" - Play once"):"Backing audio not loaded",190,y,(getWidth()-600),29,juce::Justification::centredLeft);
+    continue;
+   }
    const int loop=std::clamp(engine.loopSteps[c].load(),1,Engine::maxLoopSteps);
    const int pageStart=visibleStepPage()*Engine::steps;
    for(int j=0;j<Engine::steps;++j){int x=190+j*noteWidth;const int absoluteStep=pageStart+j;const bool active=absoluteStep<loop;g.setColour(juce::Colour(active?(j%4==0?0xff303b35:0xff222727):0xff1b2020));g.fillRoundedRectangle(static_cast<float>(x),static_cast<float>(y),static_cast<float>(noteWidth-3),29.f,3.f);
@@ -404,6 +432,7 @@ public:
   const int effectTop=sampleSelected?314:240;
   g.setColour(juce::Colour(0xff222727));g.fillRoundedRectangle(24.f,static_cast<float>(panelY),static_cast<float>(getWidth()-48),static_cast<float>(trackPanelHeight()),8.f);
   g.setColour(juce::Colour(0xffe9eeeb));g.setFont(16.f);g.drawText(juce::String(selectedTrack+1)+". "+trackNames[selectedTrack],48,panelY+11,180,24,juce::Justification::centredLeft);
+  if(!selectedTrackIsBacking()){
   label(g,"Loop steps",700,panelY+14);
   if(stepPage.isVisible())label(g,"Page "+juce::String(visibleStepPage()+1),895,panelY+14);
 	  label(g,"Kind",48,panelY+43);
@@ -424,6 +453,15 @@ public:
     g.setColour(juce::Colour(0xff94bba4));g.setFont(11.f);g.drawText("SAMPLE SHAPE",48,panelY+220,160,14,juce::Justification::centredLeft);
     label(g,"Start",48,panelY+237);label(g,"Size",168,panelY+237);label(g,"Fade",288,panelY+237);label(g,"Play",508,panelY+237);
    }
+  }else{
+   label(g,"Kind",48,panelY+43);
+   g.setFont(14.f);g.setColour(juce::Colour(0xffe9eeeb));
+   g.drawFittedText(backingFiles[selectedTrack].existsAsFile()?backingFiles[selectedTrack].getFileName():"Audio not loaded - choose the recording again",48,panelY+106,getWidth()-120,28,juce::Justification::centredLeft,1);
+   const auto& timing=backingTimings[selectedTrack];
+   g.setFont(12.f);g.setColour(juce::Colour(0xffa5b2ad));
+   g.drawText(timing.canAlign()?"Original tempo: "+juce::String(timing.bpm,1)+" BPM · Start step: "+juce::String(timing.startStep,3):"Original timing unknown or variable. Use Timing to enter a steady BPM and start step.",48,panelY+145,getWidth()-120,24,juce::Justification::centredLeft);
+   g.drawText("Full recording at original speed. Play starts it from the beginning; new tracks follow the Piece tempo.",48,panelY+180,getWidth()-120,24,juce::Justification::centredLeft);
+  }
    g.setColour(juce::Colour(0xff3b4943));g.fillRect(40,panelY+effectTop-22,getWidth()-80,1);
    label(g,"Track effects (1 then 2)",48,panelY+effectTop-17);
    for(int effectIndex=0;effectIndex<trackEffectCount;++effectIndex){
@@ -469,8 +507,9 @@ public:
   recordMix.setBounds(110,captureY+50,104,24);showRecordings.setBounds(224,captureY+50,104,24);takeList.setBounds(338,captureY+50,220,24);playTake.setBounds(568,captureY+50,90,24);revealTake.setBounds(668,captureY+50,80,24);
   takeName.setBounds(110,captureY+90,260,24);renameTake.setBounds(380,captureY+90,80,24);deleteTake.setBounds(470,captureY+90,74,24);useTakeSound.setBounds(554,captureY+90,132,24);
   finalStart.setBounds(150,captureY+130,130,24);finalEnd.setBounds(330,captureY+130,130,24);exportFinal.setBounds(480,captureY+130,120,24);
+  addTakeBacking.setBounds(700,captureY+90,160,24);
   recordDone.setBounds(getWidth()-145,captureY+10,121,24);
-  std::array<juce::Component*,16> recordControls{&recordSound,&useLastSound,&discardSound,&recordMix,&showRecordings,&takeList,&playTake,&revealTake,&takeName,&renameTake,&deleteTake,&useTakeSound,&finalStart,&finalEnd,&exportFinal,&recordDone};
+  std::array<juce::Component*,17> recordControls{&recordSound,&useLastSound,&discardSound,&recordMix,&showRecordings,&takeList,&playTake,&revealTake,&takeName,&renameTake,&deleteTake,&useTakeSound,&finalStart,&finalEnd,&exportFinal,&addTakeBacking,&recordDone};
   for(auto* control:recordControls)control->setVisible(recordPanelOpen);
   for(int c=0;c<Engine::maxTracks;++c){
    const bool active=c<activeTrackCount;
@@ -482,9 +521,11 @@ public:
    trackSelect[c].toFront(false);rowLevels[c].toFront(false);focuses[c].toFront(false);holds[c].toFront(false);mutes[c].toFront(false);solos[c].toFront(false);
   }
   if(editingTrack>=0&&editingTrack<activeTrackCount){trackNameEditor.setBounds(trackSelect[editingTrack].getBounds());trackNameEditor.toFront(false);}
-	  for(int c=0;c<Engine::maxTracks;++c){const bool selected=c==selectedTrack;const bool followerSelected=selected&&c>0;const bool sampleSelected=selected&&kinds[c].getSelectedId()==3;kinds[c].setVisible(selected);sounds[c].setVisible(selected&&kinds[c].getSelectedId()!=5);sources[c].setVisible(false);materials[c].setVisible(false);playModes[c].setVisible(sampleSelected);sampleStarts[c].setVisible(sampleSelected);sampleSizes[c].setVisible(sampleSelected);sampleFades[c].setVisible(sampleSelected);sampleReverses[c].setVisible(sampleSelected);librarySounds[c].setVisible(false);instruments[c].setVisible(false);roles[c].setVisible(followerSelected);lengths[c].setVisible(selected);loopLengths[c].setVisible(selected);rhythms[c].setVisible(selected);rhythmHits[c].setVisible(selected);rhythmRotations[c].setVisible(selected);levels[c].setVisible(false);sends[c].setVisible(selected);colors[c].setVisible(selected);moves[c].setVisible(selected);weathers[c].setVisible(selected);relationships[c].setVisible(followerSelected);dynamics[c].setVisible(selected);articulations[c].setVisible(selected);tails[c].setVisible(selected);connects[c].setVisible(selected);}
+	  for(int c=0;c<Engine::maxTracks;++c){const bool backingSelected=c==selectedTrack&&kinds[c].getSelectedId()==6;const bool selected=c==selectedTrack&&!backingSelected;backingLoops[c].setVisible(backingSelected);const bool followerSelected=selected&&c>0;const bool sampleSelected=selected&&kinds[c].getSelectedId()==3;kinds[c].setVisible(selected||backingSelected);sounds[c].setVisible(selected&&kinds[c].getSelectedId()!=5);sources[c].setVisible(false);materials[c].setVisible(false);playModes[c].setVisible(sampleSelected);sampleStarts[c].setVisible(sampleSelected);sampleSizes[c].setVisible(sampleSelected);sampleFades[c].setVisible(sampleSelected);sampleReverses[c].setVisible(sampleSelected);librarySounds[c].setVisible(false);instruments[c].setVisible(false);roles[c].setVisible(followerSelected);lengths[c].setVisible(selected);loopLengths[c].setVisible(selected);rhythms[c].setVisible(selected);rhythmHits[c].setVisible(selected);rhythmRotations[c].setVisible(selected);levels[c].setVisible(false);sends[c].setVisible(selected);colors[c].setVisible(selected);moves[c].setVisible(selected);weathers[c].setVisible(selected);relationships[c].setVisible(followerSelected);dynamics[c].setVisible(selected);articulations[c].setVisible(selected);tails[c].setVisible(selected);connects[c].setVisible(selected);}
+  chooseBacking.setVisible(hasTrack&&selectedTrackIsBacking());backingTiming.setVisible(hasTrack&&selectedTrackIsBacking());
+  if(hasTrack){chooseBacking.setBounds(230,panelY+62,140,26);backingTiming.setBounds(385,panelY+62,110,26);backingLoops[selectedTrack].setBounds(515,panelY+62,160,26);}
   if(activeTrackCount==0||selectedTrack<0||selectedTrack>=activeTrackCount){patternBack.setVisible(false);trackGenerate.setVisible(false);patternForward.setVisible(false);aiIdea.setVisible(false);trackActions.setVisible(false);stepPage.setVisible(false);soundPrevious.setVisible(false);soundNext.setVisible(false);soundRandom.setVisible(false);soundBack.setVisible(false);soundForward.setVisible(false);return;}
-	  patternBack.setVisible(true);trackGenerate.setVisible(true);patternForward.setVisible(true);aiIdea.setVisible(true);trackActions.setVisible(true);patternBack.setBounds(240,panelY+12,92,24);trackGenerate.setBounds(342,panelY+12,126,24);patternForward.setBounds(478,panelY+12,92,24);aiIdea.setBounds(580,panelY+12,88,24);loopLengths[selectedTrack].setBounds(778,panelY+12,108,26);trackActions.setBounds(getWidth()-104,panelY+12,56,24);
+	  patternBack.setVisible(!selectedTrackIsBacking());trackGenerate.setVisible(!selectedTrackIsBacking());patternForward.setVisible(!selectedTrackIsBacking());aiIdea.setVisible(!selectedTrackIsBacking());trackActions.setVisible(true);patternBack.setBounds(240,panelY+12,92,24);trackGenerate.setBounds(342,panelY+12,126,24);patternForward.setBounds(478,panelY+12,92,24);aiIdea.setBounds(580,panelY+12,88,24);loopLengths[selectedTrack].setBounds(778,panelY+12,108,26);trackActions.setBounds(getWidth()-104,panelY+12,56,24);
   rhythms[selectedTrack].setBounds(48,panelY+180,140,26);
   rhythmHits[selectedTrack].setBounds(228,panelY+180,120,26);
   rhythmRotations[selectedTrack].setBounds(388,panelY+180,120,26);
@@ -493,8 +534,8 @@ public:
   for(int page=1;page<=Engine::maxLoopSteps/Engine::steps;++page)stepPage.setItemEnabled(page+1,page<=pageCount);
   if(pageCount==1){stepPage.setSelectedId(1,juce::dontSendNotification);followedPage=0;}
   else if(stepPage.getSelectedId()>pageCount+1)stepPage.setSelectedId(pageCount+1,juce::dontSendNotification);
-  stepPage.setVisible(pageCount>1);stepPage.setBounds(945,panelY+12,60,26);
-	  soundPrevious.setVisible(kinds[selectedTrack].getSelectedId()!=5);soundNext.setVisible(kinds[selectedTrack].getSelectedId()!=5);soundRandom.setVisible(kinds[selectedTrack].getSelectedId()!=5);soundBack.setVisible(true);soundForward.setVisible(true);
+  stepPage.setVisible(pageCount>1&&!selectedTrackIsBacking());stepPage.setBounds(945,panelY+12,60,26);
+	  soundPrevious.setVisible(kinds[selectedTrack].getSelectedId()!=5&&!selectedTrackIsBacking());soundNext.setVisible(kinds[selectedTrack].getSelectedId()!=5&&!selectedTrackIsBacking());soundRandom.setVisible(kinds[selectedTrack].getSelectedId()!=5&&!selectedTrackIsBacking());soundBack.setVisible(!selectedTrackIsBacking());soundForward.setVisible(!selectedTrackIsBacking());
 	  soundBack.setBounds(508,panelY+62,28,26);soundForward.setBounds(540,panelY+62,28,26);
 	  kinds[selectedTrack].setBounds(48,panelY+62,140,26);soundPrevious.setBounds(197,panelY+62,28,26);sounds[selectedTrack].setBounds(230,panelY+62,155,26);soundNext.setBounds(390,panelY+62,28,26);soundRandom.setBounds(425,panelY+62,75,26);
    chooseInstrument.setBounds(230,panelY+62,120,26);editInstrument.setBounds(358,panelY+62,58,26);removeInstrument.setBounds(424,panelY+62,76,26);
@@ -510,7 +551,7 @@ public:
    selectTrack(track);
    if(step>=0){
     const int absoluteStep=visibleStepPage()*Engine::steps+step;
-    if(absoluteStep<engine.loopSteps[track].load()){rememberPattern(track,true);setRhythmSettings(track,0,engine.euclideanHits[track].load(),engine.euclideanRotate[track].load());engine.toggleStep(track,absoluteStep);rememberPattern(track,true);}
+    if(kinds[track].getSelectedId()!=6&&absoluteStep<engine.loopSteps[track].load()){rememberPattern(track,true);setRhythmSettings(track,0,engine.euclideanHits[track].load(),engine.euclideanRotate[track].load());engine.toggleStep(track,absoluteStep);rememberPattern(track,true);}
    }else revealSelectedTrackInspector();
    repaint();
   }
@@ -560,6 +601,7 @@ private:
   std::vector<float>* buffer=nullptr;
   int maxSamples=0;
  };
+ juce::TextButton addTakeBacking,chooseBacking,backingTiming;
  juce::TextButton play,generate,randomize,aiPiece,addTrack,cloneTrack,recordToggle,recordDone,startFade,cancelFade,chooseEffect,editEffect,bypassEffect,removeEffect,chooseInstrument,editInstrument,removeInstrument,monitorReturn,patternBack,trackGenerate,patternForward,aiIdea,trackActions,soundPrevious,soundNext,soundRandom,soundBack,soundForward,help,keep,keeps,recordSound,recordMix,showRecordings,playTake,revealTake,renameTake,deleteTake,useTakeSound,exportFinal,useLastSound,discardSound,pieceActions,save,midi,devices;
  static constexpr int trackEffectCount=2;
  std::array<juce::TextButton,trackEffectCount> chooseTrackEffect,editTrackEffect,bypassTrackEffect,trackEffectActions;
@@ -614,6 +656,7 @@ private:
  static constexpr int sequenceTop=418;
  static constexpr int sequenceRowHeight=34;
  int soundPanelY() const {return sequenceTop+activeTrackCount*sequenceRowHeight+14;}
+ bool selectedTrackIsBacking() const {return selectedTrack>=0&&selectedTrack<activeTrackCount&&kinds[selectedTrack].getSelectedId()==6;}
  bool selectedTrackIsSample() const {return selectedTrack>=0&&selectedTrack<activeTrackCount&&kinds[selectedTrack].getSelectedId()==3;}
  int trackPanelHeight() const {return selectedTrackIsSample()?392:318;}
  int recordPanelY() const {return activeTrackCount==0?sequenceTop+48:soundPanelY()+trackPanelHeight()+12;}
@@ -951,7 +994,7 @@ private:
   if(lane<0||lane>=Engine::maxTracks)return;
   if(lane>=activeTrackCount){trackSelect[lane].setIdentity(lane+1,{},{});return;}
   const auto& instrument=trackInstruments[lane];
-  const auto sound=kinds[lane].getSelectedId()==5?(instrument.effect->hasPlugin()?instrument.effect->name():instrument.pendingName.isNotEmpty()?"Not loaded: "+instrument.pendingName:"No instrument"):sounds[lane].getText();
+  const auto sound=kinds[lane].getSelectedId()==6?juce::String("Backing audio"):kinds[lane].getSelectedId()==5?(instrument.effect->hasPlugin()?instrument.effect->name():instrument.pendingName.isNotEmpty()?"Not loaded: "+instrument.pendingName:"No instrument"):sounds[lane].getText();
   trackSelect[lane].setIdentity(lane+1,trackNames[lane],sound);
   trackSelect[lane].setTooltip("Select track "+juce::String(lane+1)+": "+trackNames[lane]+". Sound: "+sound+". Double-click to rename.");
  }
@@ -1107,7 +1150,7 @@ private:
    engine.browseGain[i]=1.0f;
    soundHistory[i].clear();
    soundHistoryIndex[i]=0;
-   engine.clearTrack(i);
+   engine.clearTrack(i);backingFiles[i]=juce::File();backingClips[i].reset();backingTimings[i]=TakeTiming{};backingLoopFlags[i]=false;backingLoops[i].setToggleState(false,juce::dontSendNotification);
    holds[i].setToggleState(false,juce::sendNotification);
    mutes[i].setToggleState(false,juce::sendNotification);
    solos[i].setToggleState(false,juce::dontSendNotification);
@@ -1120,6 +1163,8 @@ private:
   resized();repaint();
  }
  void copyTrackSettings(int from,int to){
+  backingFiles[to]=backingFiles[from];backingClips[to]=backingClips[from];backingTimings[to]=backingTimings[from];
+  backingLoopFlags[to]=backingLoopFlags[from].load();backingLoops[to].setToggleState(backingLoopFlags[to].load(),juce::dontSendNotification);
 	  setLaneSoundWithoutRole(to,kinds[from].getSelectedId(),sounds[from].getSelectedId());
 	  materials[to].setSelectedId(materials[from].getSelectedId(),juce::dontSendNotification);engine.material[to]=materials[to].getSelectedId()-1;
 	  playModes[to].setSelectedId(playModes[from].getSelectedId(),juce::dontSendNotification);engine.samplePlayMode[to]=playModes[to].getSelectedId()-1;
@@ -1204,7 +1249,7 @@ private:
   fadeTargets[last]=0.0;fadeDurations[last]=12.0;
   trackNames[last].clear();
   trackSubtitles[last].clear();
-  engine.clearTrack(last);
+  engine.clearTrack(last);backingFiles[last]=juce::File();backingClips[last].reset();backingTimings[last]=TakeTiming{};backingLoopFlags[last]=false;
   patternHistory[last].clear();
   patternHistoryIndex[last]=0;
   soundHistory[last].clear();
@@ -1256,7 +1301,7 @@ private:
   index=static_cast<int>(history.size())-1;
  }
  void restorePatternStep(int direction){
-  if(selectedTrack<0||selectedTrack>=activeTrackCount)return;
+  if(selectedTrack<0||selectedTrack>=activeTrackCount||selectedTrackIsBacking())return;
   auto& history=patternHistory[selectedTrack];
   if(history.empty()){rememberPattern(selectedTrack,false);return;}
   int& index=patternHistoryIndex[selectedTrack];
@@ -1277,7 +1322,7 @@ private:
   repaint();
  }
  void generateSelectedTrackCandidate(){
-  if(selectedTrack<0||selectedTrack>=activeTrackCount)return;
+  if(selectedTrack<0||selectedTrack>=activeTrackCount||selectedTrackIsBacking())return;
   rememberPattern(selectedTrack,true);
   engine.generateTrack(selectedTrack);
   rememberPattern(selectedTrack,true);
@@ -1286,7 +1331,7 @@ private:
  }
  void generateAllTrackCandidates(){
   for(int i=0;i<activeTrackCount;++i){
-   if(holds[i].getToggleState())continue;
+   if(holds[i].getToggleState()||kinds[i].getSelectedId()==6)continue;
    rememberPattern(i,true);
    engine.generateTrack(i);
    rememberPattern(i,true);
@@ -1354,7 +1399,7 @@ private:
   refreshAppleIdeaControl();
  }
  void showAppleIdeaPrompt(bool piece=false){
-  if(!aiAvailable||(!piece&&(selectedTrack<0||selectedTrack>=activeTrackCount)))return;
+  if(!aiAvailable||(!piece&&(selectedTrack<0||selectedTrack>=activeTrackCount||selectedTrackIsBacking())))return;
   auto* dialog=new juce::AlertWindow(piece?"AI piece":"AI track for "+trackNames[selectedTrack],
    piece?"Describe a direction. Existing tracks stay; complementary tracks may be added. Keep your piece first if you want it back.":"Describe the phrase or sound you want to explore.",juce::MessageBoxIconType::NoIcon);
   dialog->addTextEditor("direction","A spacious, slowly evolving phrase","Direction");
@@ -1372,7 +1417,7 @@ private:
   status="AI idea cancelled";repaint();
  }
  void startAppleIdea(juce::String direction,bool piece){
-  if(!aiAvailable||(!piece&&(selectedTrack<0||selectedTrack>=activeTrackCount))||aiProcess)return;
+  if(!aiAvailable||(!piece&&(selectedTrack<0||selectedTrack>=activeTrackCount||selectedTrackIsBacking()))||aiProcess)return;
   direction=direction.trim().substring(0,240);
   if(direction.isEmpty()){status="Describe an idea first";repaint();return;}
   const auto helper=appleIdeaHelper();
@@ -1414,13 +1459,13 @@ private:
  void reviewApplePiece(ApplePieceIdea idea,bool fallback=false){
   idea.makePerformable();
   int available=0;
-  for(int lane=0;lane<activeTrackCount;++lane)if(!holds[lane].getToggleState())++available;
+  for(int lane=0;lane<activeTrackCount;++lane)if(!holds[lane].getToggleState()&&kinds[lane].getSelectedId()!=6)++available;
   const int layers=idea.form==1?idea.trackCount:0;
   const int target=idea.targetTrackCount(activeTrackCount,Engine::maxTracks,available);
   if(idea.form==1&&available+target-activeTrackCount<layers){status="Release a held track to make room for the drone";repaint();return;}
   const int added=target-activeTrackCount;
   int changing=0;
-  for(int lane=0;lane<activeTrackCount;++lane)if(!holds[lane].getToggleState())++changing;
+  for(int lane=0;lane<activeTrackCount;++lane)if(!holds[lane].getToggleState()&&kinds[lane].getSelectedId()!=6)++changing;
   const juce::String keys[]={"C","C#","D","Eb","E","F","F#","G","Ab","A","Bb","B"};
   const juce::String scales[]={"minor pentatonic","natural minor","major"};
   const juce::String roleNames[]={"Shadow","Contrast","Sparse","Free"};
@@ -1541,7 +1586,7 @@ private:
   }
   const int previousCount=activeTrackCount;
   int available=0;
-  for(int lane=0;lane<previousCount;++lane)if(!holds[lane].getToggleState())++available;
+  for(int lane=0;lane<previousCount;++lane)if(!holds[lane].getToggleState()&&kinds[lane].getSelectedId()!=6)++available;
   const int layers=idea.form==1?idea.trackCount:0;
   const int target=idea.targetTrackCount(previousCount,Engine::maxTracks,available);
   if(idea.form==1&&available+target-previousCount<layers){status="Release a held track to make room for the drone";repaint();return;}
@@ -1554,7 +1599,7 @@ private:
   int changing=0;
   int droneLayer=0;
   for(int lane=0;lane<activeTrackCount;++lane){
-   if(holds[lane].getToggleState())continue;
+   if(holds[lane].getToggleState()||kinds[lane].getSelectedId()==6)continue;
    if(idea.form==1&&droneLayer>=layers){
     mutes[lane].setToggleState(true,juce::sendNotification);
     holds[lane].setToggleState(true,juce::sendNotification);
@@ -1661,6 +1706,14 @@ private:
  std::atomic<bool> takePlaying{false};
  int takePlaybackFrames=0;
  int takePlaybackPosition=0;
+ BackingTracks backingAudio;
+ BackingTracks::Clips backingClips{};
+ std::array<juce::File,Engine::maxTracks> backingFiles{};
+ std::array<TakeTiming,Engine::maxTracks> backingTimings{};
+ std::array<std::atomic<bool>,Engine::maxTracks> backingLoopFlags{};
+ std::array<juce::ToggleButton,Engine::maxTracks> backingLoops;
+ std::unique_ptr<juce::FileChooser> backingFileChooser;
+ TakeTiming recordingTiming;
  juce::TimeSliceThread recordWriterThread{"Take writer"};
  std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> mixWriter;
  juce::File recordingMixFile;
@@ -1937,7 +1990,7 @@ private:
   }
   if(!aiAvailabilityProcess&&!aiProcess&&juce::Time::getMillisecondCounter()-aiLastAvailabilityCheck>=30000)checkAppleIdeaAvailability();
   processMidiQueue();
-  engine.reclaimSoundBanks();
+  engine.reclaimSoundBanks();backingAudio.reclaim();
   if(monitorReturn.getToggleState()!=audioReturnEnabled.load()){
    monitorReturn.setToggleState(audioReturnEnabled.load(),juce::dontSendNotification);
    if(!audioReturnEnabled.load())status="Stereo input disconnected; return off";
@@ -1986,6 +2039,7 @@ private:
 	  renameTake.setEnabled(takeList.getSelectedId()>0&&takeName.getText().trim().isNotEmpty());
 	  deleteTake.setEnabled(takeList.getSelectedId()>0&&!recordingMix.load());
 	  useTakeSound.setEnabled(takeList.getSelectedId()>0&&!recordingMix.load());
+   addTakeBacking.setEnabled(takeList.getSelectedId()>0&&!recordingMix.load()&&activeTrackCount<Engine::maxTracks);
 	  exportFinal.setEnabled(takeList.getSelectedId()>0);
   if(recordingSound.load()){
    const double seconds=static_cast<double>(captureTap.recordedSamples())/std::max(1.0,captureSampleRate.load());
@@ -2012,6 +2066,7 @@ private:
   applySoundChoice(lane);
  }
  void applyNewTrackDefaults(int lane,bool isNewDiscovery){
+  backingFiles[lane]=juce::File();backingClips[lane].reset();backingTimings[lane]=TakeTiming{};backingLoopFlags[lane]=false;backingLoops[lane].setToggleState(false,juce::dontSendNotification);
   holds[lane].setToggleState(false,juce::sendNotification);
   mutes[lane].setToggleState(false,juce::sendNotification);
   solos[lane].setToggleState(false,juce::dontSendNotification);
@@ -2074,6 +2129,8 @@ private:
    case 4:
     sounds[lane].addItem("Harmonics",1);sounds[lane].addItem("Reed ghost",2);sounds[lane].addItem("Recorder haze",3);sounds[lane].addItem("Pipe dusk",4);
     break;
+   case 6:
+    sounds[lane].addItem("Backing audio",1);break;
    case 5:
     sounds[lane].addItem("Instrument plugin",1);
     break;
@@ -2094,7 +2151,7 @@ private:
   const int sound=sounds[lane].getSelectedId();
   const bool wasHosted=(engine.hostedInstrumentMask.load()&(1u<<lane))!=0;
   if(wasHosted&&kind!=5)trackInstruments[lane].effect->requestAllNotesOff();
-  if(kind==5){
+  if(kind==5||kind==6){
    engine.sourceType[lane]=0;
   }else if(kind==2){
    engine.sourceType[lane]=13;
@@ -2126,13 +2183,16 @@ private:
   uint32_t mask=0;
   for(int i=0;i<activeTrackCount;++i)if(kinds[i].getSelectedId()==5)mask|=1u<<i;
   engine.hostedInstrumentMask.store(mask);
+  uint32_t backingMask=0;BackingTracks::Clips clips{};
+  for(int i=0;i<activeTrackCount;++i)if(kinds[i].getSelectedId()==6){backingMask|=1u<<i;clips[i]=backingClips[i];}
+  backingAudio.publish(clips);engine.backingTrackMask.store(backingMask);
  }
  bool validSoundChoice(SoundChoice choice) const {
   if(choice.kind==1)return (choice.sound>=1&&choice.sound<=8)||(choice.sound>=10&&choice.sound<=13);
   if(choice.kind==2)return choice.sound>=1&&choice.sound<=7;
   if(choice.kind==3)return choice.sound>=1&&choice.sound<=sampleDisplayNames.size()+1;
   if(choice.kind==4)return choice.sound>=1&&choice.sound<=4;
-  if(choice.kind==5)return choice.sound==1;
+  if(choice.kind==5||choice.kind==6)return choice.sound==1;
   return false;
  }
  void rememberSoundChoice(int lane){
@@ -2230,6 +2290,7 @@ private:
   mode.setSelectedId(1+r.nextInt(3));
   changeEvery.setValue(1+r.nextInt(8));
   for(int i=0;i<activeTrackCount;++i){
+   if(kinds[i].getSelectedId()==6)continue;
    kinds[i].setSelectedId(1+r.nextInt(4),juce::dontSendNotification);
    refreshSoundMenu(i,false,false);
    const auto ids=availableSoundIds(i);
@@ -2327,6 +2388,102 @@ private:
  juce::File finalDirectory() const {
   return currentPieceDirectory().getChildFile("Finals");
  }
+ juce::File backingDirectory() const {return currentPieceDirectory().getChildFile("Backing Tracks");}
+ static juce::File timingFile(const juce::File& file){return file.getSiblingFile(file.getFileName()+".timing.json");}
+ static juce::var timingObject(const TakeTiming& timing){
+  juce::DynamicObject::Ptr object=new juce::DynamicObject();
+  object->setProperty("version",1);object->setProperty("bpm",timing.bpm);object->setProperty("startStep",timing.startStep);
+  object->setProperty("steadyTempo",timing.steady);object->setProperty("startedPlaying",timing.startedPlaying);
+  return juce::var(object.get());
+ }
+ static TakeTiming parseTiming(const juce::var& value){
+  TakeTiming timing;
+  if(auto* object=value.getDynamicObject()){
+   timing.bpm=static_cast<double>(object->getProperty("bpm"));timing.startStep=static_cast<double>(object->getProperty("startStep"));
+   timing.steady=static_cast<bool>(object->getProperty("steadyTempo"));timing.startedPlaying=static_cast<bool>(object->getProperty("startedPlaying"));
+  }
+  if(!std::isfinite(timing.bpm)||!std::isfinite(timing.startStep)){timing=TakeTiming{};}
+  return timing;
+ }
+ static bool writeTakeTiming(const juce::File& file,const TakeTiming& timing){return timingFile(file).replaceWithText(juce::JSON::toString(timingObject(timing),true));}
+ std::shared_ptr<const BackingTracks::Clip> readBackingClip(const juce::File& file){
+  std::unique_ptr<juce::AudioFormatReader> reader(file.existsAsFile()?audioFormats.createReaderFor(file):nullptr);
+  if(reader==nullptr||reader->lengthInSamples<1||reader->sampleRate<=0||reader->numChannels<1){status="Could not read backing audio: "+file.getFileName();return {};}
+  if(reader->lengthInSamples>2147483647){status="This backing recording is too large to load into memory";return {};}
+  try{
+   const int frames=static_cast<int>(reader->lengthInSamples);
+   juce::AudioBuffer<float> decoded(2,frames);
+   if(!reader->read(&decoded,0,frames,0,true,true)){status="Could not read the complete backing recording";return {};}
+   auto clip=std::make_shared<BackingTracks::Clip>();clip->rate=reader->sampleRate;
+   clip->left.assign(decoded.getReadPointer(0),decoded.getReadPointer(0)+frames);
+   const int right=reader->numChannels>1?1:0;
+   clip->right.assign(decoded.getReadPointer(right),decoded.getReadPointer(right)+frames);
+   return clip;
+  }catch(const std::bad_alloc&){status="Not enough memory to load this complete backing recording";return {};}
+ }
+ void chooseBackingAudio(){
+  const int lane=selectedTrack;
+  if(lane<0||lane>=activeTrackCount||recordingMix.load())return;
+  const auto name=trackNames[lane];
+  backingFileChooser=std::make_unique<juce::FileChooser>("Choose backing audio",mixRecordingDirectory(),"*.wav;*.aif;*.aiff;*.flac;*.mp3");
+  const juce::Component::SafePointer<MainView> safe(this);
+  backingFileChooser->launchAsync(juce::FileBrowserComponent::openMode|juce::FileBrowserComponent::canSelectFiles,[safe,lane,name](const juce::FileChooser& chooser){
+   if(safe==nullptr||lane>=safe->activeTrackCount||safe->trackNames[lane]!=name)return;
+   const auto file=chooser.getResult();if(file.existsAsFile())safe->showAddBackingDialog(file,lane);
+  });
+ }
+ void showAddBackingDialog(const juce::File& file,int replace=-1){
+  if(recordingMix.load()||mixFinishPending){status="Finish recording the take first";repaint();return;}
+  if(replace>=activeTrackCount)return;
+  if(!file.existsAsFile()){status="Select a recorded take, or choose a backing audio file";repaint();return;}
+  if(replace<0&&activeTrackCount>=Engine::maxTracks){status="Remove a track to make room for backing audio";repaint();return;}
+  const TakeTiming timing=replace>=0&&backingFiles[replace]==file?backingTimings[replace]:parseTiming(juce::JSON::parse(timingFile(file)));
+  auto* dialog=new juce::AlertWindow(replace<0?"Add backing track":"Backing timing",
+   (timing.canAlign()?"Recorded timing is available. Restore it to align new patterns with the recording.":"This recording has no reliable steady-tempo timing. Enter its original BPM if known; start step 0 assumes it began on the first beat.")
+   +juce::String(replace<0?"\nAdds the complete recording as a new track and mutes existing tracks. You can unmute them individually.":"\nTiming applies to the whole Piece. The audio always plays at its original speed."),juce::MessageBoxIconType::NoIcon);
+  dialog->addTextEditor("bpm",timing.canAlign()?juce::String(timing.bpm,3):juce::String(),"Original BPM (optional)");
+  dialog->addTextEditor("start",timing.canAlign()?juce::String(timing.startStep,6):juce::String("0"),"Starting step (optional; 0 = beginning)");
+  dialog->addButton(replace<0?"Add + use timing":"Use timing",1,timing.canAlign()?juce::KeyPress(juce::KeyPress::returnKey):juce::KeyPress());
+  dialog->addButton(replace<0?"Add only":"Keep current timing",2,!timing.canAlign()?juce::KeyPress(juce::KeyPress::returnKey):juce::KeyPress());
+  dialog->addButton("Cancel",0,juce::KeyPress(juce::KeyPress::escapeKey));
+  const juce::Component::SafePointer<MainView> safe(this);
+  const auto piece=pieceId;const auto replacedName=replace>=0?trackNames[replace]:juce::String();
+  dialog->enterModalState(true,juce::ModalCallbackFunction::create([safe,dialog,file,replace,piece,replacedName,timing](int result){
+   if(safe==nullptr||result==0)return;
+   if(safe->pieceId!=piece||(replace>=0&&(replace>=safe->activeTrackCount||safe->trackNames[replace]!=replacedName))){safe->status="The Piece changed; choose the backing track again";safe->repaint();return;}
+   TakeTiming chosen=timing;
+   if(result==1){
+    chosen.bpm=dialog->getTextEditorContents("bpm").getDoubleValue();chosen.startStep=dialog->getTextEditorContents("start").getDoubleValue();chosen.steady=true;chosen.startedPlaying=true;
+    if(!chosen.canAlign()){safe->status="Enter an original BPM from 10 to 240, or choose Add only";safe->repaint();return;}
+   }
+   safe->addBackingFile(file,chosen,result==1,replace);
+  }),true);
+ }
+ bool addBackingFile(const juce::File& file,const TakeTiming& timing,bool useTiming,int replace=-1){
+  if(recordingMix.load()||mixFinishPending){status="Finish take recording before changing backing audio";repaint();return false;}
+  if(replace<0&&activeTrackCount>=Engine::maxTracks){status="All eight tracks are in use";repaint();return false;}
+  if(replace<-1||replace>=activeTrackCount)return false;
+  auto clip=readBackingClip(file);if(!clip){repaint();return false;}
+  const auto dir=backingDirectory();if(!dir.createDirectory().wasOk()){status="Could not create the backing audio folder";repaint();return false;}
+  auto target=file;
+  if(file.getParentDirectory()!=dir){target=uniqueSiblingFile(dir.getChildFile(file.getFileName()));if(!file.copyFileTo(target)){status="Could not copy the complete backing audio";repaint();return false;}}
+  const bool timingSaved=writeTakeTiming(target,timing);
+  const int previousCount=activeTrackCount;
+  const int lane=replace>=0?replace:previousCount;
+  engine.playing=false;stopTakePlayback();
+  if(replace<0)setTrackCount(previousCount+1,false,true);
+  backingFiles[lane]=target;backingClips[lane]=std::move(clip);backingTimings[lane]=timing;
+  backingLoopFlags[lane]=false;backingLoops[lane].setToggleState(false,juce::dontSendNotification);
+  setLaneSoundWithoutRole(lane,6,1);trackNames[lane]=file.getFileNameWithoutExtension();trackSubtitles[lane]="Backing recording";
+  setManualTrackLevel(lane,100);holds[lane].setToggleState(true,juce::sendNotification);mutes[lane].setToggleState(false,juce::sendNotification);
+  if(replace<0){setSoloTrack(-1);setFocusTrack(-1);for(int i=0;i<previousCount;++i)mutes[i].setToggleState(true,juce::sendNotification);}
+  if(useTiming&&timing.canAlign()){tempo.setValue(timing.bpm,juce::sendNotificationSync);engine.transportStartStep=timing.startStep;}
+  engine.activateTracks(activeTrackCount);engine.restartFromBeginning();updateHostedInstrumentMask();selectTrack(lane);
+  play.setButtonText("Play");status="Backing ready: "+file.getFileName()+" · "+timeText(backingClips[lane]->duration());
+  if(!timingSaved)status+=" (could not save audio timing sidecar)";
+  resized();repaint();return true;
+ }
+
  void renderTakePlayback(const juce::AudioSourceChannelInfo& info){
   if(!takePlaying.load())return;
   const juce::ScopedTryLock lock(takePlaybackLock);
@@ -2440,9 +2597,11 @@ private:
 	  target=uniqueSiblingFile(target);
 	  stopTakePlayback();
 	  const bool ok=file.moveFileTo(target);
+   const bool timingOk=!ok||!timingFile(file).existsAsFile()||timingFile(file).moveFileTo(timingFile(target));
 	  refreshTakeList(false);
 	  selectTakeNamed(target.getFileNameWithoutExtension());
 	  status=ok?"Renamed take: "+target.getFileNameWithoutExtension():"Could not rename take";
+   if(ok&&!timingOk)status+=" (timing file could not be renamed)";
 	  repaint();
 	 }
 	 void confirmDeleteSelectedTake(){
@@ -2460,6 +2619,7 @@ private:
 	  const auto name=file.getFileNameWithoutExtension();
 	  stopTakePlayback();
 	  const bool ok=file.deleteFile();
+   if(ok)timingFile(file).deleteFile();
 	  refreshTakeList(false);
 	  takeName.setText(selectedTakeFile().existsAsFile()?selectedTakeFile().getFileNameWithoutExtension():juce::String(),juce::dontSendNotification);
 	  status=ok?"Deleted take: "+name:"Could not delete take";
@@ -2583,7 +2743,7 @@ private:
    buffer.setSample(ch,i,std::tanh(value*1.15f)*limiterScale*0.94f);
   }
   const auto base=file.getFileNameWithoutExtension()+" Final "+juce::Time::getCurrentTime().formatted("%Y-%m-%d %H.%M.%S");
-  const auto out=finalDirectory().getChildFile(juce::File::createLegalFileName(base)).withFileExtension(".wav");
+  const auto out=uniqueSiblingFile(finalDirectory().getChildFile(juce::File::createLegalFileName(base)).withFileExtension(".wav"));
   out.getParentDirectory().createDirectory();
   juce::WavAudioFormat format;
   std::unique_ptr<juce::FileOutputStream> stream(out.createOutputStream());
@@ -2592,8 +2752,13 @@ private:
   if(writer==nullptr){status="Could not write final";repaint();return;}
   stream.release();
   if(!writer->writeFromAudioSampleBuffer(buffer,0,frames)){status="Could not write final";repaint();return;}
+  writer.reset();
+  auto timing=parseTiming(juce::JSON::parse(timingFile(file)));
+  if(timing.canAlign())timing.startStep+=static_cast<double>(startFrame)/rate*timing.bpm*4.0/60.0;
+  const bool timingSaved=writeTakeTiming(out,timing);
   out.revealToUser();
   status="Final exported: "+out.getFileNameWithoutExtension();
+  if(!timingSaved)status+=" (could not save timing)";
   repaint();
  }
  int soundIdForFile(const juce::File& file) const {
@@ -2651,7 +2816,7 @@ private:
    return;
   }
   mixRecordSampleRate=std::max(8000.0,captureSampleRate.load());
-  recordingMixFile=mixRecordingDirectory().getChildFile(juce::File::createLegalFileName(makeMixName())).withFileExtension(".wav");
+  recordingMixFile=uniqueSiblingFile(mixRecordingDirectory().getChildFile(juce::File::createLegalFileName(makeMixName())).withFileExtension(".wav"));
   recordingMixFile.getParentDirectory().createDirectory();
   juce::WavAudioFormat format;
   std::unique_ptr<juce::FileOutputStream> stream(recordingMixFile.createOutputStream());
@@ -2661,9 +2826,13 @@ private:
   stream.release();
   if(!recordWriterThread.isThreadRunning()&&!recordWriterThread.startThread()){status="Could not start take writer";repaint();return;}
   mixWriter=std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(writer.release(),recordWriterThread,static_cast<int>(mixRecordSampleRate*2.0));
-  mixRecordedFrames.store(0);
-  mixDroppedBlocks.store(0);
-  recordingMix.store(true);
+  stopTakePlayback();
+  {
+   const juce::ScopedLock audioLock(deviceManager.getAudioCallbackLock());
+   recordingTiming=TakeTiming{};mixRecordedFrames.store(0);mixDroppedBlocks.store(0);
+   if(!engine.playing.load()){engine.restartFromBeginning();engine.playing=true;play.setButtonText("Stop");}
+   recordingMix.store(true);
+  }
   recordMix.setButtonText("Stop take");
   status="Recording take 0:00";
   repaint();
@@ -2675,10 +2844,12 @@ private:
   if(mixRecordedFrames.load()<static_cast<int64_t>(mixRecordSampleRate*0.25)){
    recordingMixFile.deleteFile();status="Take too short";repaint();return;
   }
+  const bool timingSaved=writeTakeTiming(recordingMixFile,recordingTiming);
   lastMixFile=recordingMixFile;
   refreshTakeList(false);
   selectTakeNamed(recordingMixFile.getFileNameWithoutExtension());
   status="Saved take: "+recordingMixFile.getFileNameWithoutExtension();
+  if(!timingSaved)status+=" (could not save timing)";
   if(mixDroppedBlocks.load()>0)status+=" (audio dropped: "+juce::String(mixDroppedBlocks.load())+" blocks)";
   repaint();
  }
@@ -2918,7 +3089,8 @@ private:
  }
  juce::DynamicObject::Ptr makeStateObject(){
   juce::DynamicObject::Ptr root=new juce::DynamicObject();
-  root->setProperty("version",6);
+  root->setProperty("version",7);
+  root->setProperty("transportStartStep",engine.transportStartStep.load());
   root->setProperty("trackCount",activeTrackCount);
   root->setProperty("selectedTrack",selectedTrack);
   root->setProperty("soloTrack",engine.soloTrack.load());
@@ -2932,6 +3104,10 @@ private:
   juce::Array<juce::var> lanes;
   for(int i=0;i<activeTrackCount;++i){
    juce::DynamicObject::Ptr lane=new juce::DynamicObject();
+   if(kinds[i].getSelectedId()==6){
+    lane->setProperty("backingFile",backingFiles[i].getFullPathName());lane->setProperty("backingName",backingFiles[i].getFileName());
+    lane->setProperty("backingLoop",backingLoopFlags[i].load());lane->setProperty("backingTiming",timingObject(backingTimings[i]));
+   }
    lane->setProperty("name",trackNames[i]);lane->setProperty("subtitle",trackSubtitles[i]);
    juce::Array<juce::var> effects;
    for(const auto& slot:trackEffectSlots[i])effects.add(slot.effect->hasPlugin()?slot.effect->saveState():slot.pending);
@@ -2985,6 +3161,9 @@ private:
  }
  bool applyStateObject(juce::DynamicObject* root){
   if(root==nullptr)return false;
+  for(int i=0;i<Engine::maxTracks;++i){backingFiles[i]=juce::File();backingClips[i].reset();backingTimings[i]=TakeTiming{};backingLoopFlags[i]=false;backingLoops[i].setToggleState(false,juce::dontSendNotification);}
+  const double startStep=root->hasProperty("transportStartStep")?static_cast<double>(root->getProperty("transportStartStep")):0.0;
+  engine.transportStartStep=std::isfinite(startStep)?std::clamp(startStep,0.0,1.0e12):0.0;
   pluginPickerWindow.reset();pickerTarget=nullptr;
   for(auto& chain:trackEffectSlots)for(auto& slot:chain){
    ++slot.revision;slot.editor.reset();slot.effect->clear();slot.pending=juce::var();slot.pendingName.clear();
@@ -3027,6 +3206,14 @@ private:
    if(soundHistory[i].empty())soundHistory[i].push_back({kinds[i].getSelectedId(),sounds[i].getSelectedId()});
    soundHistoryIndex[i]=lane->hasProperty("soundHistoryIndex")?std::clamp(static_cast<int>(lane->getProperty("soundHistoryIndex")),0,static_cast<int>(soundHistory[i].size())-1):static_cast<int>(soundHistory[i].size())-1;
    if(!(soundHistory[i][static_cast<size_t>(soundHistoryIndex[i])]==SoundChoice{kinds[i].getSelectedId(),sounds[i].getSelectedId()}))rememberSoundChoice(i);
+   if(kinds[i].getSelectedId()==6){
+    const auto local=backingDirectory().getChildFile(juce::File::createLegalFileName(lane->getProperty("backingName").toString()));
+    const auto path=lane->getProperty("backingFile").toString();
+    const auto file=local.existsAsFile()?local:juce::File::isAbsolutePath(path)?juce::File(path):juce::File();
+    backingFiles[i]=file;backingTimings[i]=parseTiming(lane->getProperty("backingTiming"));
+    backingClips[i]=readBackingClip(file);
+    backingLoopFlags[i]=static_cast<bool>(lane->getProperty("backingLoop"));backingLoops[i].setToggleState(backingLoopFlags[i].load(),juce::dontSendNotification);
+   }
    if(lane->hasProperty("source"))sources[i].setSelectedId(static_cast<int>(lane->getProperty("source")),juce::dontSendNotification);
 	   if(lane->hasProperty("material")){materials[i].setSelectedId(static_cast<int>(lane->getProperty("material")),juce::dontSendNotification);engine.material[i]=materials[i].getSelectedId()-1;}
 	   if(lane->hasProperty("playMode")){playModes[i].setSelectedId(static_cast<int>(lane->getProperty("playMode")),juce::dontSendNotification);engine.samplePlayMode[i]=playModes[i].getSelectedId()-1;}
@@ -3098,7 +3285,7 @@ private:
   if(root->hasProperty("focusTrack"))setFocusTrack(static_cast<int>(root->getProperty("focusTrack")));
   if(root->hasProperty("randomState"))engine.seed(static_cast<uint32_t>(static_cast<juce::int64>(root->getProperty("randomState"))));
   midiMappings.resetPickup();
-  engine.restartFromBeginning();
+  updateHostedInstrumentMask();engine.restartFromBeginning();
   resized();repaint();
   return true;
  }
@@ -3134,6 +3321,11 @@ private:
   if(!folder.createDirectory().wasOk()){status="Could not create Keep";repaint();return;}
   const auto source=userSampleDirectory();
   if(source.isDirectory()&&!source.copyDirectoryTo(folder.getChildFile("Sources"))){status="Could not copy captured sounds into Keep";repaint();return;}
+  for(int lane=0;lane<activeTrackCount;++lane)if(kinds[lane].getSelectedId()==6){
+   const auto source=backingFiles[lane];const auto destination=folder.getChildFile("Backing Tracks").getChildFile(source.getFileName());
+   if(!source.existsAsFile()||!destination.getParentDirectory().createDirectory().wasOk()||!source.copyFileTo(destination)){status="Could not copy backing audio into Keep";repaint();return;}
+   if(!writeTakeTiming(destination,backingTimings[lane])){status="Could not copy backing timing into Keep";repaint();return;}
+  }
   const auto olderSources=legacySampleDirectory();
   if(olderSources.isDirectory()&&!olderSources.copyDirectoryTo(folder.getChildFile("Older Sources"))){status="Could not copy older sounds into Keep";repaint();return;}
   auto root=makeStateObject();
@@ -3210,6 +3402,7 @@ private:
   const auto captured=branch.getChildFile("Captured Sounds");
   for(const auto& source:{folder.getChildFile("Older Sources"),folder.getChildFile("Sources")})
    if(source.isDirectory()&&!source.copyDirectoryTo(captured)){status="Could not restore captured sounds";repaint();return;}
+  if(folder.getChildFile("Backing Tracks").isDirectory()&&!folder.getChildFile("Backing Tracks").copyDirectoryTo(branch.getChildFile("Backing Tracks"))){status="Could not restore backing tracks";repaint();return;}
   engine.playing=false;takePlaying=false;
   pieceId=juce::Uuid().toString();
   sceneName.setText(branchName,juce::dontSendNotification);
@@ -3231,7 +3424,8 @@ private:
   randomize.setTooltip("Change the entire piece: tempo, musical behavior, patterns, sounds, levels, and effects.");
   addTrack.setTooltip("Add a new independent track with a random name and sound.");
   cloneTrack.setTooltip("Copy the selected track's pattern, sound, controls, and plugin settings into a new track.");
-  recordToggle.setTooltip("Show or hide sound capture, take management, and final export.");
+  recordToggle.setTooltip("Show or hide sound capture, take management, backing-track import, and final export.");
+  addTakeBacking.setTooltip("Add the complete selected take as a stereo backing track, with optional tempo alignment. Existing tracks are muted.");
   recordDone.setTooltip("Return to the instrument.");
   patternBack.setTooltip("Restore the previous generated pattern for the selected track.");
   trackGenerate.setTooltip("Generate a new pattern for only the selected track. Euclidean keeps Hits and Rotate while choosing new pitches; followers use Role and Relationship.");
@@ -3253,7 +3447,7 @@ private:
   pieceActions.setTooltip("Open a saved Piece, make a new name, or move a saved Piece to Trash.");
   save.setTooltip("Save the current full setup as a piece.");
   recordSound.setTooltip("Capture the microphone as a new reusable sound source.");
-  recordMix.setTooltip("Record the app output as a take.");
+  recordMix.setTooltip("Record the full mix, including backing tracks. Starts playback if stopped and saves BPM and starting position.");
   showRecordings.setTooltip("Open this piece's takes folder.");
   useLastSound.setTooltip("Put the last microphone recording onto the selected track.");
   discardSound.setTooltip("Delete the last microphone recording.");
@@ -3287,7 +3481,7 @@ private:
    solos[i].setTooltip("Hear only this track, even when muted. Click again to restore the mix.");
    focuses[i].setTooltip("Fade the other tracks down while their patterns keep evolving. Click again to restore the mix.");
    connects[i].setTooltip("Join consecutive notes without a new attack. Short samples may end before the next note.");
-	   kinds[i].setTooltip("Choose a sound family, or Plugin for a hosted AU/VST3 instrument on this track.");
+	   kinds[i].setTooltip("Choose a sound family, Plugin for a hosted instrument, or Backing for a complete audio recording.");
 	   sounds[i].setTooltip("Choose a sound within the selected family.");
 	   playModes[i].setTooltip("Pitch changes speed with notes. Retrigger restarts at original speed. Bed keeps running underneath.");
 	   roles[i].setTooltip("Follower behavior: Shadow stays closest to Main, Contrast offsets it, Sparse leaves space, Free wanders farther.");
