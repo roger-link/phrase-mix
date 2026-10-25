@@ -662,6 +662,7 @@ private:
  int recordPanelY() const {return activeTrackCount==0?sequenceTop+48:soundPanelY()+trackPanelHeight()+12;}
  int contentHeight() const {return recordPanelOpen?std::max(760,recordPanelY()+180):std::max(760,recordPanelY());}
  void setRecordPanelOpen(bool open){
+  if(open)refreshTakeList(true);
   recordPanelOpen=open;
   recordToggle.setToggleState(open,juce::dontSendNotification);
   recordToggle.setButtonText(open?"Hide Record / Finish":"Record / Finish");
@@ -2885,7 +2886,24 @@ private:
  }
  juce::File fileForSceneName(const juce::String& name) const {
   const auto safe=juce::File::createLegalFileName(name.trim().isEmpty()?makeSceneName():name.trim());
-  return sceneDirectory().getChildFile(safe).withFileExtension(".json");
+  const auto full=sceneDirectory().getChildFile(safe+".json");
+  if(full.existsAsFile())return full;
+  // Earlier saves treated a dotted timestamp as an extension. Reuse that file
+  // only when its stored name matches, so distinct dotted names cannot collide.
+  const auto legacy=sceneDirectory().getChildFile(safe).withFileExtension(".json");
+  if(legacy.existsAsFile()){
+   const auto data=juce::JSON::parse(legacy);
+   if(auto* root=data.getDynamicObject())if(root->getProperty("pieceName").toString().trim()==name.trim())return legacy;
+  }
+  return full;
+ }
+ juce::String savedPieceName(const juce::File& file) const {
+  const auto data=juce::JSON::parse(file);
+  if(auto* root=data.getDynamicObject()){
+   const auto name=root->getProperty("pieceName").toString().trim();
+   if(name.isNotEmpty())return name;
+  }
+  return file.getFileNameWithoutExtension();
  }
  void showPieceActionsMenu(){
   juce::Array<juce::File> files;
@@ -2894,12 +2912,12 @@ private:
   const int count=files.size();
   juce::PopupMenu menu;
   menu.addSectionHeader("Open saved Piece");
-  for(int i=0;i<count;++i)menu.addItem(i+1,files.getReference(i).getFileNameWithoutExtension());
+  for(int i=0;i<count;++i)menu.addItem(i+1,savedPieceName(files.getReference(i)));
   if(count==0)menu.addItem(2,"No saved Pieces",false);
   menu.addSeparator();
   menu.addItem(count+1,"New name for current setup");
   juce::PopupMenu removeMenu;
-  for(int i=0;i<count;++i)removeMenu.addItem(count+2+i,files.getReference(i).getFileNameWithoutExtension());
+  for(int i=0;i<count;++i)removeMenu.addItem(count+2+i,savedPieceName(files.getReference(i)));
   menu.addSubMenu("Move saved Piece to Trash...",removeMenu,count>0);
   juce::Component::SafePointer<MainView> safe(this);
   menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(pieceActions),[safe,files,count](int result){
@@ -3296,19 +3314,21 @@ private:
   currentPieceDirectory().createDirectory();
   const auto file=fileForSceneName(sceneName.getText());file.getParentDirectory().createDirectory();
   const bool ok=file.replaceWithText(juce::JSON::toString(juce::var(root.get()),true));
-  status=ok?"Piece saved: "+file.getFileNameWithoutExtension():"Save failed";
+  status=ok?"Piece saved: "+currentPieceName():"Save failed";
   repaint();
  }
  void loadScene(const juce::File& file){
   if(!file.existsAsFile()){status="That saved piece is no longer available";repaint();return;}
   juce::var data=juce::JSON::parse(file);auto* root=data.getDynamicObject();if(root==nullptr){status="Could not read piece";repaint();return;}
   const auto savedId=root->getProperty("pieceId").toString().trim();
-  pieceId=savedId.isNotEmpty()?savedId:legacyPieceId(file.getFileNameWithoutExtension());
-  sceneName.setText(file.getFileNameWithoutExtension(),juce::dontSendNotification);
+  const auto storedName=root->getProperty("pieceName").toString().trim();
+  const auto name=storedName.isNotEmpty()?storedName:file.getFileNameWithoutExtension();
+  pieceId=savedId.isNotEmpty()?savedId:legacyPieceId(name);
+  sceneName.setText(name,juce::dontSendNotification);
   loadSampleLibrary();
   refreshTakeList(false);
   if(!applyStateObject(root)){status="Could not read piece";repaint();return;}
-  status="Piece loaded: "+file.getFileNameWithoutExtension();
+  status="Piece loaded: "+name;
   repaint();
  }
  juce::File keepsDirectory() const {return appDataDirectory().getChildFile("Keeps");}
