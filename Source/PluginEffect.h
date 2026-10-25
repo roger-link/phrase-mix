@@ -26,8 +26,11 @@ public:
  }
 
  void process(float* left,float* right,int samples,const juce::MidiBuffer* notes=nullptr){
-  const juce::ScopedLock guard(lock);
-  if(instance==nullptr||!prepared||bypassed){
+  // Audio must never wait for plugin setup/editor/state calls. Audio Unit setup
+  // can itself wait for CoreAudio to finish this callback.
+  const juce::ScopedTryLock guard(lock);
+  if(!guard.isLocked()||instance==nullptr||!prepared||bypassed.load()){
+   if(instrumentSlot)notesOffPending.store(true);
    if(instrumentSlot){std::fill_n(left,samples,0.0f);std::fill_n(right,samples,0.0f);}
    return;
   }
@@ -78,6 +81,7 @@ public:
    old=std::move(instance);
    oldPrepared=prepared;
    instance=std::move(next);
+   available.store(true);
    pluginDescription=description;
    bypassed=bypass;
    prepared=true;
@@ -92,6 +96,7 @@ public:
   {
    const juce::ScopedLock guard(lock);
    old=std::move(instance);
+   available.store(false);
    oldPrepared=prepared;
    pluginDescription={};
    bypassed=false;
@@ -100,10 +105,10 @@ public:
   if(old!=nullptr&&oldPrepared)old->releaseResources();
  }
 
- void setBypassed(bool value){const juce::ScopedLock guard(lock);bypassed=value;}
+ void setBypassed(bool value){bypassed.store(value);}
  void requestAllNotesOff(){if(instrumentSlot)notesOffPending.store(true);}
- bool isBypassed() const {const juce::ScopedLock guard(lock);return bypassed;}
- bool hasPlugin() const {const juce::ScopedLock guard(lock);return instance!=nullptr;}
+ bool isBypassed() const {return bypassed.load();}
+ bool hasPlugin() const {return available.load();}
  juce::String name() const {const juce::ScopedLock guard(lock);return instance!=nullptr?pluginDescription.name:juce::String(instrumentSlot?"No instrument":"No effect");}
  juce::AudioProcessorEditor* createEditor(){
   const juce::ScopedLock guard(lock);
@@ -120,7 +125,7 @@ public:
   juce::DynamicObject::Ptr result=new juce::DynamicObject();
   if(auto descriptionXml=pluginDescription.createXml())result->setProperty("description",descriptionXml->toString());
   result->setProperty("state",data.toBase64Encoding());
-  result->setProperty("bypassed",bypassed);
+  result->setProperty("bypassed",bypassed.load());
   return juce::var(result.get());
  }
 
@@ -135,7 +140,8 @@ private:
  juce::AudioBuffer<float> extraInputs;
  double sampleRate=48000.0;
  int block=512;
- bool bypassed=false;
+ std::atomic<bool> bypassed{false};
+ std::atomic<bool> available{false};
  bool prepared=false;
  bool instrumentSlot=false;
  std::atomic<bool> notesOffPending{false};
